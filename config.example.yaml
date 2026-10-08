@@ -1,0 +1,49 @@
+# cpa-intent-router 插件配置示例
+
+enabled: true
+gateway_url: "http://127.0.0.1:8000"
+gateway_key: "" # 可选：调用网关的 API 凭据
+
+# 可选：如果希望从独立外部文件加载组与规则，配置 config_file
+# config_file: "/data/cli/groups.yaml"
+
+groups:
+  - id: "opus-anywhere"
+    name: "Opus Anywhere"
+    members:
+      - "openrouter/google/gemini-2.5-pro"
+      - "deepseek-chat"
+      - "claude/claude-3-7-sonnet"
+    classifier: "gemini/gemini-2.5-flash"
+    fallback: "claude/claude-3-7-sonnet"
+    rules:
+      # 1. 超长上下文优先分流至高吞吐大模型
+      - use: "openrouter/google/gemini-2.5-pro"
+        tokens: 200000
+
+      # 2. 多模态图片输入路由至视觉模型
+      - use: "deepseek-chat"
+        images: true
+
+      # 3. 简单问答意图分流至快速小模型
+      - use: "deepseek-chat"
+        intent: "a quick question"
+
+      # 4. 高思考要求路由至带 Thinking 的主力模型
+      - use: "claude/claude-3-7-sonnet:high"
+        effort: "high"
+
+      # 5. 会话压缩请求分流至高性价比模型
+      - use: "deepseek-chat"
+        compact: true
+
+      # 6. 时间窗口规则（如特定时段分流）
+      - use: "deepseek-chat"
+        time:
+          from: "14:00"
+          to: "18:00"
+          days: ["mon", "tue", "wed", "thu", "fri"]
+
+      # 7. 指定客户端来源分流
+      - use: "claude/claude-3-7-sonnet"
+        agents: ["claude", "codex"]
