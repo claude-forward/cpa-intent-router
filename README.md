@@ -20,6 +20,59 @@ flowchart LR
 
 ---
 
+## 使用方式
+
+分流路由不限定特定 API 路径，所有支持的推理接口（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 等）均完全支持。只需在请求时将模型名称指定为**虚拟组标识**即可触发两阶段分流：
+
+### 1. 触发分流与常规透传机制
+
+- **触发智能分流**：客户端请求的 `model` 字段填入组 ID（如 `opus-anywhere`）或带前缀的 `group/<id>`（如 `group/opus-anywhere`）。
+- **常规原生请求透传**：若客户端请求具体模型名称（如 `claude-sonnet-4-6`、`deepseek-flash`），插件直接忽略并由宿主原样处理，零额外开销。
+
+### 2. 客户端调用示例
+
+#### OpenAI 兼容协议接口 (`/v1/chat/completions`)
+
+```bash
+curl -X POST http://<host>:<port>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-token>" \
+  -d '{
+    "model": "group/opus-anywhere",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ]
+  }'
+```
+
+#### Anthropic 协议接口 (`/v1/messages`)
+
+```bash
+curl -X POST http://<host>:<port>/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <your-token>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "opus-anywhere",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
+```
+
+#### Claude Code / CLI 客户端配置
+
+在客户端配置文件或启动参数中，将默认模型直接设置为组标识即可无感享受自动化分流：
+
+```json
+{
+  "model": "group/opus-anywhere"
+}
+```
+
+---
+
 ## 核心能力
 
 1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口，自动注册至 `/v1/models`。

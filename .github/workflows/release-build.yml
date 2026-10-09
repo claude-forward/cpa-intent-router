@@ -1,0 +1,125 @@
+name: release-build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build:
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            extension: so
+            artifact_suffix: linux-amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            extension: so
+            artifact_suffix: linux-arm64
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            extension: dylib
+            artifact_suffix: darwin-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build shared library
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eu
+          out_dir="release/plugins/${GOOS}/${GOARCH}"
+          mkdir -p "${out_dir}"
+          if [ "${GOOS}" = "linux" ]; then
+            docker run --rm \
+              -e GOOS \
+              -e GOARCH \
+              -v "${GITHUB_WORKSPACE}:/src" \
+              -w /src \
+              golang:1.26-bookworm \
+              bash -lc 'apt-get update >/dev/null && apt-get install -y --no-install-recommends build-essential >/dev/null && CGO_ENABLED=1 /usr/local/go/bin/go build -trimpath -buildvcs=false -buildmode=c-shared -o "release/plugins/${GOOS}/${GOARCH}/cpa-intent-router.so" .'
+          else
+            CGO_ENABLED=1 go build -trimpath -buildvcs=false -buildmode=c-shared -o "${out_dir}/cpa-intent-router.${{ matrix.extension }}" .
+          fi
+          rm -f "${out_dir}/cpa-intent-router.h"
+
+      - name: Package plugin store asset
+        env:
+          TAG: ${{ github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          asset_dir="asset"
+          mkdir -p "${asset_dir}"
+          archive="cpa-intent-router_${version}_${GOOS}_${GOARCH}.zip"
+          plugin_path="release/plugins/${GOOS}/${GOARCH}"
+          (
+            cd "${plugin_path}"
+            zip -q "${GITHUB_WORKSPACE}/${asset_dir}/${archive}" "cpa-intent-router.${{ matrix.extension }}"
+          )
+
+      - name: Upload packaged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_suffix }}
+          path: |
+            asset/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -eu
+          cd release-assets
+          sha256sum *.zip > checksums.txt
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

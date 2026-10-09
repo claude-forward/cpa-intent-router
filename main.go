@@ -273,7 +273,17 @@ func routeModel(raw []byte) ([]byte, error) {
 	}
 
 	resp := r.RouteModel(context.Background(), req.ModelRouteRequest)
+	if resp.Handled {
+		hostLog("info", fmt.Sprintf("[cpa-intent-router] route decision: target=%s/%s reason=%s req_model=%s", resp.Target, resp.TargetModel, resp.Reason, req.RequestedModel))
+	}
 	return okEnvelope(resp)
+}
+
+func hostLog(level, message string) {
+	_, _ = callHost(pluginabi.MethodHostLog, map[string]any{
+		"level":   level,
+		"message": message,
+	})
 }
 
 func callHostModelExecute(ctx context.Context, model string, body []byte) ([]byte, error) {
