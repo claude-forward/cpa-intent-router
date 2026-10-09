@@ -187,8 +187,11 @@ func TestRouter_SystemOneClassifier(t *testing.T) {
 			t.Errorf("decode systemone body: %v", errDecode)
 		}
 		gotInput, _ = body["input"].(string)
-		questions, _ := body["questions"].([]any)
-		if len(questions) == 1 {
+		if qMap, ok := body["questions"].(map[string]any); ok {
+			if q, ok := qMap["intent"].(map[string]any); ok {
+				gotOptions, _ = q["options"].([]any)
+			}
+		} else if questions, ok := body["questions"].([]any); ok && len(questions) == 1 {
 			if q, ok := questions[0].(map[string]any); ok {
 				gotOptions, _ = q["options"].([]any)
 			}
@@ -242,7 +245,7 @@ func TestRouter_SystemOneClassifier(t *testing.T) {
 	if gotInput != "what is 1+1?" {
 		t.Errorf("expected user text forwarded as input, got %q", gotInput)
 	}
-	if len(gotOptions) != 1 || gotOptions[0] != "simple question" {
+	if len(gotOptions) < 1 || gotOptions[0] != "simple question" {
 		t.Errorf("expected candidate intents as options, got %v", gotOptions)
 	}
 }

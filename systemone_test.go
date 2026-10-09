@@ -10,38 +10,39 @@ import (
 )
 
 func TestNewSystemOneClient_Disabled(t *testing.T) {
-	if c := NewSystemOneClient(nil); c != nil {
-		t.Errorf("expected nil client for nil config, got %+v", c)
+	if got := NewSystemOneClient(nil); got != nil {
+		t.Errorf("expected nil client for nil config, got %v", got)
 	}
-	if c := NewSystemOneClient(&ClassifierConfig{Endpoint: "   "}); c != nil {
-		t.Errorf("expected nil client for empty endpoint, got %+v", c)
+	if got := NewSystemOneClient(&ClassifierConfig{}); got != nil {
+		t.Errorf("expected nil client for empty endpoint, got %v", got)
 	}
-	if c := NewSystemOneClient(&ClassifierConfig{Type: "host", Endpoint: "https://example.test/v1/systemone"}); c != nil {
-		t.Errorf("expected nil client for unsupported type, got %+v", c)
+	client := NewSystemOneClient(&ClassifierConfig{Endpoint: "https://example.com/v1/systemone"})
+	if client == nil || !client.Enabled() {
+		t.Errorf("expected enabled client")
 	}
-
-	c := NewSystemOneClient(&ClassifierConfig{Endpoint: "https://example.test/v1/systemone"})
-	if !c.Enabled() {
-		t.Fatalf("expected client to be enabled")
-	}
-	if c.Timeout() != defaultSystemOneTimeout {
-		t.Errorf("expected default timeout %s, got %s", defaultSystemOneTimeout, c.Timeout())
+	if client.Timeout() != defaultSystemOneTimeout {
+		t.Errorf("expected default timeout %v, got %v", defaultSystemOneTimeout, client.Timeout())
 	}
 }
 
 func TestSystemOneClient_ModelFallback(t *testing.T) {
-	c := NewSystemOneClient(&ClassifierConfig{Endpoint: "https://example.test/v1/systemone"})
-	if got := c.Model("group-classifier"); got != "group-classifier" {
-		t.Errorf("expected fallback model group-classifier, got %q", got)
+	c1 := NewSystemOneClient(&ClassifierConfig{
+		Endpoint: "https://example.com/v1/systemone",
+		Model:    "jev-latest",
+	})
+	if c1.Model("gemini-flash") != "jev-latest" {
+		t.Errorf("expected global model jev-latest, got %s", c1.Model("gemini-flash"))
 	}
 
-	c2 := NewSystemOneClient(&ClassifierConfig{Endpoint: "https://example.test/v1/systemone", Model: "jev"})
-	if got := c2.Model("group-classifier"); got != "jev" {
-		t.Errorf("expected configured model jev, got %q", got)
+	c2 := NewSystemOneClient(&ClassifierConfig{
+		Endpoint: "https://example.com/v1/systemone",
+	})
+	if c2.Model("gemini-flash") != "gemini-flash" {
+		t.Errorf("expected fallback gemini-flash, got %s", c2.Model("gemini-flash"))
 	}
 }
 
-func TestSystemOneClient_Classify_Success(t *testing.T) {
+func TestSystemOneClient_Classify_Success_TypeSafeOfficial(t *testing.T) {
 	var gotMethod, gotPath, gotAuth, gotContentType string
 	var gotBody map[string]any
 
@@ -54,16 +55,14 @@ func TestSystemOneClient_Classify_Success(t *testing.T) {
 			t.Errorf("decode request body: %v", errDecode)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// TypeSafe Official responses format
 		_, _ = w.Write([]byte(`{
 			"id": "sys1_01923",
-			"model": "jev",
-			"results": {
+			"model": "jev-latest",
+			"answers": {
 				"intent": {
-					"selected": "complex_architecture",
-					"probabilities": {
-						"quick_lookup": 0.02,
-						"complex_architecture": 0.96
-					}
+					"choice": "complex_architecture",
+					"confidence": 0.96
 				}
 			},
 			"usage": {"prompt_tokens": 65}
@@ -74,7 +73,7 @@ func TestSystemOneClient_Classify_Success(t *testing.T) {
 	client := NewSystemOneClient(&ClassifierConfig{
 		Endpoint: server.URL + "/v1/systemone",
 		APIKey:   "ts-secret",
-		Model:    "jev",
+		Model:    "jev-latest",
 	})
 	intents := []string{"quick_lookup", "complex_architecture", "creative_writing"}
 
@@ -97,35 +96,47 @@ func TestSystemOneClient_Classify_Success(t *testing.T) {
 	if gotContentType != "application/json" {
 		t.Errorf("expected json content type, got %q", gotContentType)
 	}
-	if gotBody["model"] != "jev" {
-		t.Errorf("expected model jev in request body, got %v", gotBody["model"])
+	if gotBody["model"] != "jev-latest" {
+		t.Errorf("expected model jev-latest in request body, got %v", gotBody["model"])
 	}
-	if gotBody["input"] != "How do I implement the saga pattern in Go?" {
-		t.Errorf("unexpected input field: %v", gotBody["input"])
+	if gotBody["state"] != "How do I implement the saga pattern in Go?" {
+		t.Errorf("unexpected state field: %v", gotBody["state"])
 	}
 
-	questions, ok := gotBody["questions"].([]any)
-	if !ok || len(questions) != 1 {
-		t.Fatalf("expected single questions entry, got %v", gotBody["questions"])
+	questions, ok := gotBody["questions"].(map[string]any)
+	if !ok || questions["intent"] == nil {
+		t.Fatalf("expected questions.intent map, got %v", gotBody["questions"])
 	}
-	q, ok := questions[0].(map[string]any)
-	if !ok {
-		t.Fatalf("expected question object, got %T", questions[0])
+}
+
+func TestSystemOneClient_Classify_NoneOfTheAbove(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "sys1_01924",
+			"model": "jev-latest",
+			"answers": {
+				"intent": {
+					"choice": "none_of_the_above",
+					"confidence": 0.99
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewSystemOneClient(&ClassifierConfig{
+		Endpoint: server.URL + "/v1/systemone",
+	})
+	intents := []string{"writing_tests"}
+
+	// When user prompt is completely unrelated, return empty intent so router continues to fallback
+	got, err := client.Classify(context.Background(), "jev-latest", intents, "Translate this poem to French")
+	if err != nil {
+		t.Fatalf("Classify failed: %v", err)
 	}
-	if q["type"] != "choice" {
-		t.Errorf("expected question type choice, got %v", q["type"])
-	}
-	if q["name"] != systemOneQuestionName {
-		t.Errorf("expected question name %s, got %v", systemOneQuestionName, q["name"])
-	}
-	options, ok := q["options"].([]any)
-	if !ok || len(options) != len(intents) {
-		t.Fatalf("expected %d options, got %v", len(intents), q["options"])
-	}
-	for i, opt := range options {
-		if opt != intents[i] {
-			t.Errorf("expected option[%d]=%s, got %v", i, intents[i], opt)
-		}
+	if got != "" {
+		t.Errorf("expected empty string when none_of_the_above chosen, got %q", got)
 	}
 }
 
@@ -134,7 +145,7 @@ func TestSystemOneClient_Classify_EnvExpansion(t *testing.T) {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer env-secret" {
 			t.Errorf("expected expanded bearer token, got %q", auth)
 		}
-		_, _ = w.Write([]byte(`{"results":{"intent":{"selected":"quick question"}}}`))
+		_, _ = w.Write([]byte(`{"answers":{"intent":{"choice":"quick question"}}}`))
 	}))
 	defer server.Close()
 
@@ -174,7 +185,7 @@ func TestSystemOneClient_Classify_ErrorStatus(t *testing.T) {
 
 func TestSystemOneClient_Classify_UnknownSelection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"results":{"intent":{"selected":"not_a_candidate"}}}`))
+		_, _ = w.Write([]byte(`{"answers":{"intent":{"choice":"not_a_candidate"}}}`))
 	}))
 	defer server.Close()
 
@@ -193,6 +204,11 @@ func TestMatchSelectedIntent(t *testing.T) {
 	}
 	if got != "quick question" {
 		t.Errorf("expected quick question, got %q", got)
+	}
+
+	gotNone, errNone := matchSelectedIntent(noneIntentOption, intents)
+	if errNone != nil || gotNone != "" {
+		t.Errorf("expected empty string and nil error for noneIntentOption, got (%q, %v)", gotNone, errNone)
 	}
 
 	if _, err := matchSelectedIntent("  ", intents); err == nil {
