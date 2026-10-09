@@ -4,6 +4,69 @@
 
 ---
 
+## 架构与路由流程
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  [按意图]   [按规则]   [超长上下文]   [多模态]   [思考深度]     智能决策：首轮动态解析特征与意图，同轮工具调用严格锁定   │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                                        │
+│   ┌─────────────────┐             ┌───────────────────────┐             ┌─● claude-3-7-sonnet:high ───────────服务中─┐ │
+│   │   Claude Code   │             │      CLIProxyAPI      │             │   复杂设计 / 深度推理 (effort=high)          │ │
+│   │      Codex      │ ──────────► │   cpa-intent-router   │ ──────────► ├─○ gemini-2.5-pro ───────────────已就绪─┤ │
+│   │    OpenCode     │             │                       │             │   超长上下文分析 (tokens ≥ 200k)             │ │
+│   │    你的 Agent   │             │  虚拟组: group/dev    │             ├─○ deepseek-chat ────────────────就绪─┤ │
+│   └─────────────────┘             └───────────────────────┘             │   日常快速问答 (intent="quick question")     │ │
+│                                                                         ├─○ qwen-vl-max ──────────────────已就绪─┤ │
+│                                                                         │   多模态视觉识别 (images=true)               │ │
+│                                                                         └─○ deepseek-flash ───────────────已就绪─┤ │
+│                                                                             会话上下文压缩 (compact=true)              │ │
+│                                                                                                                        │
+│   客户端将请求发往虚拟模型 group/dev，由插件按上下文与意图自动路由至最佳模型，并保持工具调用会话一致。                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+```mermaid
+flowchart LR
+    subgraph Client [客户端 / Agent]
+        A[Claude Code / Codex / OpenCode]
+    end
+
+    subgraph Gateway [CLIProxyAPI 聚合网关]
+        B[虚拟路由组<br/>group/dev]
+        P[cpa-intent-router 插件<br/>ModelRouter ABI]
+        B --> P
+    end
+
+    subgraph Phase1 [第一阶段：上下文特征初筛]
+        R1{静态规则匹配}
+        P --> R1
+        R1 -- "Token ≥ 200k" --> M2[gemini-2.5-pro<br/>海量上下文]
+        R1 -- "含图片/附件" --> M4[qwen-vl-max<br/>多模态视觉]
+        R1 -- "effort=high" --> M1[claude-3-7-sonnet:high<br/>深度推理]
+        R1 -- "compact 摘要" --> M5[deepseek-flash<br/>低成本压缩]
+    end
+
+    subgraph Phase2 [第二阶段：小模型意图分类]
+        R1 -- "需判定自然语言意图" --> C[Classifier 小模型<br/>gemini-flash / deepseek]
+        C -- "intent: quick question" --> M3[deepseek-chat<br/>轻量快速]
+        C -- "intent: architecture" --> M1
+    end
+
+    subgraph Target [目标模型服务池]
+        M1
+        M2
+        M3
+        M4
+        M5
+    end
+
+    A -->|model: group/dev| B
+    Target -.->|同轮工具调用 Tool Result 严格锁定| P
+```
+
+---
+
 ## 核心能力
 
 1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口。
