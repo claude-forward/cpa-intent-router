@@ -211,10 +211,12 @@ func ParseMember(member string) (provider, targetModel string) {
 }
 
 // ResolveProvider 解析目标模型对应的有效 Provider。
-// 若配置已显式指定 provider，则直接使用；
-// 若未指定 provider，则根据模型名称前缀与宿主传入的 availableProviders 智能推导，
+// 优先级：
+// 1. 若配置中已显式指定（如 "antigravity/claude-sonnet-4-6" 或 "openai-compatibility/deepseek-flash"），直接采用；
+// 2. 若未显式指定（如 "deepseek-flash"），优先在宿主全局配置动态映射表中查找匹配的 Provider；
+// 3. 若映射表未收录（如 OAuth 动态挂载凭据），结合宿主传入的 availableProviders 智能兜底；
 // 确保 Target 永不为空（避免触发宿主 invalid target 拒绝）。
-func ResolveProvider(specifiedProvider, model string, availableProviders []string) string {
+func ResolveProvider(specifiedProvider, model string, modelMappings map[string]string, availableProviders []string) string {
 	specifiedProvider = strings.ToLower(strings.TrimSpace(specifiedProvider))
 	if specifiedProvider != "" {
 		return specifiedProvider
@@ -223,6 +225,13 @@ func ResolveProvider(specifiedProvider, model string, availableProviders []strin
 	modelLower := strings.ToLower(strings.TrimSpace(model))
 	if idx := strings.Index(modelLower, "("); idx != -1 {
 		modelLower = strings.TrimSpace(modelLower[:idx])
+	}
+
+	// 1. 优先查宿主主配置动态映射表（按宿主实际绑定的 provider 返回）
+	if modelMappings != nil {
+		if p, ok := modelMappings[modelLower]; ok && p != "" {
+			return p
+		}
 	}
 
 	has := func(p string) bool {
@@ -234,17 +243,13 @@ func ResolveProvider(specifiedProvider, model string, availableProviders []strin
 		return false
 	}
 
-	if strings.HasPrefix(modelLower, "claude-") {
+	// 2. 若宿主主配置 API key 段未声明，但通过 OAuth (如 Antigravity / Codex) 接入
+	if strings.HasPrefix(modelLower, "claude-") || strings.HasPrefix(modelLower, "gemini-") {
 		if has("antigravity") {
 			return "antigravity"
 		}
 		if has("claude") {
 			return "claude"
-		}
-	}
-	if strings.HasPrefix(modelLower, "gemini-") {
-		if has("antigravity") {
-			return "antigravity"
 		}
 		if has("gemini") {
 			return "gemini"
@@ -258,23 +263,16 @@ func ResolveProvider(specifiedProvider, model string, availableProviders []strin
 			return "openai"
 		}
 	}
-	if strings.HasPrefix(modelLower, "deepseek-") {
-		if has("openai") {
-			return "openai"
-		}
-		if has("deepseek") {
-			return "deepseek"
-		}
-	}
 	if strings.HasPrefix(modelLower, "grok-") || strings.HasPrefix(modelLower, "xai-") {
 		if has("xai") {
 			return "xai"
 		}
-		if has("openai") {
-			return "openai"
-		}
 	}
 
+	// 3. 兜底回退
+	if has("openai-compatibility") {
+		return "openai-compatibility"
+	}
 	if has("openai") {
 		return "openai"
 	}
@@ -282,6 +280,120 @@ func ResolveProvider(specifiedProvider, model string, availableProviders []strin
 		return availableProviders[0]
 	}
 	return "openai"
+}
+
+// FindHostConfigPath 探测宿主主配置文件路径
+func FindHostConfigPath() string {
+	for i := 0; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if (arg == "-config" || arg == "--config") && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+		if strings.HasPrefix(arg, "-config=") {
+			return strings.TrimPrefix(arg, "-config=")
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	candidates := []string{
+		"config.yaml",
+		"/data/cli/config.yaml",
+		"../config.yaml",
+		"../../config.yaml",
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// LoadHostModelMappings 从宿主整体配置中解析各个 Provider 及其注册的模型列表
+func LoadHostModelMappings(configPath string) map[string]string {
+	mappings := make(map[string]string)
+	if configPath == "" {
+		configPath = FindHostConfigPath()
+	}
+	if configPath == "" {
+		return mappings
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return mappings
+	}
+
+	return ParseHostModelMappingsFromYAML(data)
+}
+
+// ParseHostModelMappingsFromYAML 解析宿主配置 YAML 字节构建 model -> provider 索引
+func ParseHostModelMappingsFromYAML(data []byte) map[string]string {
+	mappings := make(map[string]string)
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil || len(root.Content) == 0 {
+		return mappings
+	}
+
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return mappings
+	}
+
+	for i := 0; i < len(doc.Content)-1; i += 2 {
+		keyNode := doc.Content[i]
+		valNode := doc.Content[i+1]
+		key := strings.ToLower(strings.TrimSpace(keyNode.Value))
+
+		var provider string
+		switch key {
+		case "openai-compatibility":
+			provider = "openai-compatibility"
+		case "codex-api-key":
+			provider = "codex"
+		case "claude-api-key":
+			provider = "claude"
+		case "gemini-api-key":
+			provider = "gemini"
+		case "xai-api-key":
+			provider = "xai"
+		case "vertex-api-key":
+			provider = "vertex"
+		case "meta-api-key":
+			provider = "meta"
+		}
+
+		if provider != "" && valNode.Kind == yaml.SequenceNode {
+			for _, item := range valNode.Content {
+				extractModelsFromYAMLNode(item, provider, mappings)
+			}
+		}
+	}
+
+	return mappings
+}
+
+func extractModelsFromYAMLNode(node *yaml.Node, provider string, mappings map[string]string) {
+	if node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		k := strings.ToLower(strings.TrimSpace(node.Content[i].Value))
+		v := node.Content[i+1]
+		if k == "models" && v.Kind == yaml.SequenceNode {
+			for _, modelNode := range v.Content {
+				if modelNode.Kind == yaml.MappingNode {
+					for mIdx := 0; mIdx < len(modelNode.Content)-1; mIdx += 2 {
+						mk := strings.ToLower(strings.TrimSpace(modelNode.Content[mIdx].Value))
+						mv := strings.ToLower(strings.TrimSpace(modelNode.Content[mIdx+1].Value))
+						if (mk == "name" || mk == "alias") && mv != "" {
+							mappings[mv] = provider
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 func isEffortLevel(val string) bool {

@@ -64,35 +64,38 @@ plugins:
           fallback: "claude/claude-3-7-sonnet"  # 兜底模型：所有规则未命中时生效
 
           # rules: 分流匹配规则链（从上到下顺序匹配，首个完全命中即生效）
+          # 支持两种模型写法：
+          # 1. 显式指定 Provider（推荐）：如 "antigravity/claude-sonnet-4-6"、"codex/gpt-6.1-sol:high"
+          # 2. 纯模型名（由插件自动查宿主全局配置动态推导）：如 "deepseek-flash"
           rules:
-            # 1. 深度推理思考分流 (客户端要求 reasoning_effort=high 时)
-            - use: "claude/claude-3-7-sonnet:high"
+            # 1. 深度推理思考分流 (显式指定 Provider: codex)
+            - use: "codex/gpt-6.1-sol:high"
               effort: "high"
 
-            # 2. 超长上下文分流 (Tokens >= 200,000)
-            - use: "openrouter/google/gemini-2.5-pro"
+            # 2. 超长上下文分流 (Tokens >= 200,000，显式指定 Provider: antigravity)
+            - use: "antigravity/gemini-3.8-flash-high"
               tokens: 200000
 
             # 3. 多模态视觉分流 (携带图片/附件)
-            - use: "deepseek-chat"
+            - use: "codex/gpt-6-luna"
               images: true
 
-            # 4. 会话压缩分流 (客户端触发 /compact 自动摘要时)
-            - use: "deepseek-chat"
+            # 4. 会话压缩分流 (纯模型名，由插件动态查宿主配置映射至 openai-compatibility)
+            - use: "deepseek-flash"
               compact: true
 
             # 5. 时间窗口分流 (特定时段生效，支持跨午夜)
-            - use: "deepseek-chat"
+            - use: "deepseek-flash"
               time:
                 from: "14:00"
                 to: "18:00"
                 days: ["mon", "tue", "wed", "thu", "fri"]
 
-            # 6. 客户端来源分流 (根据 User-Agent 识别客户端)
-            - use: "claude/claude-3-7-sonnet"
+            # 6. 客户端来源分流 (显式指定 Provider: antigravity)
+            - use: "antigravity/claude-sonnet-4-6"
               agents: ["claude", "codex"]
 
             # 7. 意图分类分流 (位于静态规则后、fallback 上方；前序静态规则未命中时惰性触发小模型判定)
-            - use: "deepseek-chat"
-              intent: "a quick question"
+            - use: "deepseek-flash"
+              intent: "a quick question or simple factual lookup"
 ```

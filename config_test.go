@@ -108,3 +108,67 @@ func TestMatchTimeWindow(t *testing.T) {
 		t.Errorf("expected wCross not to match 12:00")
 	}
 }
+
+func TestParseHostModelMappingsFromYAML(t *testing.T) {
+	mockHostYAML := []byte(`
+openai-compatibility:
+  - name: kenari
+    models:
+      - name: deepseek-v4-1-flash
+        alias: ""
+      - name: deepseek-v4-flash
+        alias: "deepseek-flash"
+codex-api-key:
+  - api-key: sk-xxx
+    models:
+      - name: gpt-6.1-sol
+      - name: gpt-6-luna
+claude-api-key:
+  - api-key: sk-ant-xxx
+    models:
+      - name: claude-sonnet-4-6
+`)
+
+	mappings := ParseHostModelMappingsFromYAML(mockHostYAML)
+	if len(mappings) == 0 {
+		t.Fatalf("expected mappings to be parsed")
+	}
+
+	if mappings["deepseek-flash"] != "openai-compatibility" {
+		t.Errorf("expected deepseek-flash -> openai-compatibility, got %s", mappings["deepseek-flash"])
+	}
+	if mappings["deepseek-v4-flash"] != "openai-compatibility" {
+		t.Errorf("expected deepseek-v4-flash -> openai-compatibility, got %s", mappings["deepseek-v4-flash"])
+	}
+	if mappings["gpt-6.1-sol"] != "codex" {
+		t.Errorf("expected gpt-6.1-sol -> codex, got %s", mappings["gpt-6.1-sol"])
+	}
+	if mappings["claude-sonnet-4-6"] != "claude" {
+		t.Errorf("expected claude-sonnet-4-6 -> claude, got %s", mappings["claude-sonnet-4-6"])
+	}
+}
+
+func TestResolveProvider_TwoStyles(t *testing.T) {
+	mockMappings := map[string]string{
+		"deepseek-flash": "openai-compatibility",
+	}
+	available := []string{"antigravity", "codex", "openai-compatibility"}
+
+	// 风格一：纯模型名（无 Provider 前缀），通过宿主配置动态查表解析
+	p1 := ResolveProvider("", "deepseek-flash", mockMappings, available)
+	if p1 != "openai-compatibility" {
+		t.Errorf("expected p1=openai-compatibility, got %s", p1)
+	}
+
+	// 风格二：显式指定 Provider 前缀（如 antigravity/claude-sonnet-4-6）
+	p2 := ResolveProvider("antigravity", "claude-sonnet-4-6", mockMappings, available)
+	if p2 != "antigravity" {
+		t.Errorf("expected p2=antigravity, got %s", p2)
+	}
+
+	// 风格三：OAuth 动态凭据模型（未在 API key 段中出现，但存在 antigravity 可用提供商）
+	p3 := ResolveProvider("", "claude-sonnet-4-6", mockMappings, available)
+	if p3 != "antigravity" {
+		t.Errorf("expected p3=antigravity, got %s", p3)
+	}
+}

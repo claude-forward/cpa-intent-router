@@ -17,6 +17,7 @@ type Router struct {
 	sessions   *SessionTracker
 	classifier *ClassifierClient
 	caller     HostModelCaller
+	hostModels map[string]string
 }
 
 // NewRouter 创建 Router 实例
@@ -26,6 +27,7 @@ func NewRouter(cfg PluginConfig, caller HostModelCaller) *Router {
 		sessions:   NewSessionTracker(1 * time.Hour),
 		classifier: NewClassifierClient(caller),
 		caller:     caller,
+		hostModels: LoadHostModelMappings(""),
 	}
 	return r
 }
@@ -36,6 +38,14 @@ func (r *Router) UpdateConfig(cfg PluginConfig) {
 	defer r.mu.Unlock()
 	r.cfg = cfg
 	r.classifier = NewClassifierClient(r.caller)
+	r.hostModels = LoadHostModelMappings("")
+}
+
+// SetHostModels 设置宿主模型映射索引（主要供单元测试使用）
+func (r *Router) SetHostModels(mappings map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hostModels = mappings
 }
 
 // RouteModel 评估传入请求并返回路由决策
@@ -43,6 +53,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	r.mu.RLock()
 	cfg := r.cfg
 	classifierClient := r.classifier
+	hostModels := r.hostModels
 	r.mu.RUnlock()
 
 	if !cfg.Enabled {
@@ -62,7 +73,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	// 2. 轮次亲和性锁定：同一个 Turn 内部的多步工具交互（Tool Result）严格锁定在初始选择的模型
 	if feat.Within && sessionKey != "" {
 		if dec, found := r.sessions.GetDecision(sessionKey, now); found && dec.TargetModel != "" {
-			targetProvider := ResolveProvider(dec.TargetProvider, dec.TargetModel, req.AvailableProviders)
+			targetProvider := ResolveProvider(dec.TargetProvider, dec.TargetModel, hostModels, req.AvailableProviders)
 			return pluginapi.ModelRouteResponse{
 				Handled:     true,
 				TargetKind:  pluginapi.ModelRouteTargetProvider,
@@ -107,7 +118,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 			if targetModel == "" {
 				continue
 			}
-			targetProvider := ResolveProvider(provider, targetModel, req.AvailableProviders)
+			targetProvider := ResolveProvider(provider, targetModel, hostModels, req.AvailableProviders)
 			if sessionKey != "" {
 				r.sessions.SetDecision(sessionKey, TurnDecision{
 					TargetProvider: targetProvider,
@@ -133,7 +144,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	if fallbackChoice != "" {
 		provider, targetModel := ParseMember(fallbackChoice)
 		if targetModel != "" {
-			targetProvider := ResolveProvider(provider, targetModel, req.AvailableProviders)
+			targetProvider := ResolveProvider(provider, targetModel, hostModels, req.AvailableProviders)
 			if sessionKey != "" {
 				r.sessions.SetDecision(sessionKey, TurnDecision{
 					TargetProvider: targetProvider,
