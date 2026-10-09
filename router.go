@@ -97,21 +97,24 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 			return currentIntent
 		}
 		classifiedDone = true
-		if group.Classifier != "" && feat.UserText != "" {
+		hasSystemOne := systemOneClient != nil && systemOneClient.Enabled() && (systemOneClient.Model("") != "" || group.Classifier != "")
+		if (hasSystemOne || group.Classifier != "") && feat.UserText != "" {
 			candidateIntents := collectCandidateIntents(group.Rules, feat)
 			if len(candidateIntents) > 0 {
 				// 配置了外部 System One 分类器时优先直连 POST /v1/systemone；
 				// 未配置或调用失败（返回空意图）时回退到宿主内部 host.model.execute 调用
 				if systemOneClient != nil && systemOneClient.Enabled() {
 					model := systemOneClient.Model(group.Classifier)
-					classifierCtx, cancel := context.WithTimeout(ctx, systemOneClient.Timeout())
-					detected, errClassify := systemOneClient.Classify(classifierCtx, model, candidateIntents, feat.UserText)
-					cancel()
-					if errClassify == nil && detected != "" {
-						currentIntent = detected
+					if model != "" {
+						classifierCtx, cancel := context.WithTimeout(ctx, systemOneClient.Timeout())
+						detected, errClassify := systemOneClient.Classify(classifierCtx, model, candidateIntents, feat.UserText)
+						cancel()
+						if errClassify == nil && detected != "" {
+							currentIntent = detected
+						}
 					}
 				}
-				if currentIntent == "" {
+				if currentIntent == "" && group.Classifier != "" {
 					classifierCtx, cancel := context.WithTimeout(ctx, defaultClassifierTimeout)
 					detected, errClassify := classifierClient.Classify(classifierCtx, group.Classifier, candidateIntents, feat.UserText)
 					cancel()

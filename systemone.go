@@ -126,12 +126,20 @@ func (c *SystemOneClient) Classify(ctx context.Context, model string, intents []
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxSystemOneResponseBytes))
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxSystemOneResponseBytes+1))
 	if err != nil {
 		return "", err
 	}
+	if len(respBytes) > maxSystemOneResponseBytes {
+		return "", errors.New("systemone response exceeds maximum allowed size")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("systemone request failed with status %d", resp.StatusCode)
+	}
+
+	var jsonCheck json.RawMessage
+	if errJSON := json.Unmarshal(respBytes, &jsonCheck); errJSON != nil {
+		return "", fmt.Errorf("systemone response is not valid JSON: %w", errJSON)
 	}
 
 	selected := gjson.GetBytes(respBytes, "results."+systemOneQuestionName+".selected").String()
