@@ -210,6 +210,80 @@ func ParseMember(member string) (provider, targetModel string) {
 	return provider, targetModel
 }
 
+// ResolveProvider 解析目标模型对应的有效 Provider。
+// 若配置已显式指定 provider，则直接使用；
+// 若未指定 provider，则根据模型名称前缀与宿主传入的 availableProviders 智能推导，
+// 确保 Target 永不为空（避免触发宿主 invalid target 拒绝）。
+func ResolveProvider(specifiedProvider, model string, availableProviders []string) string {
+	specifiedProvider = strings.ToLower(strings.TrimSpace(specifiedProvider))
+	if specifiedProvider != "" {
+		return specifiedProvider
+	}
+
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.Index(modelLower, "("); idx != -1 {
+		modelLower = strings.TrimSpace(modelLower[:idx])
+	}
+
+	has := func(p string) bool {
+		for _, ap := range availableProviders {
+			if strings.EqualFold(ap, p) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if strings.HasPrefix(modelLower, "claude-") {
+		if has("antigravity") {
+			return "antigravity"
+		}
+		if has("claude") {
+			return "claude"
+		}
+	}
+	if strings.HasPrefix(modelLower, "gemini-") {
+		if has("antigravity") {
+			return "antigravity"
+		}
+		if has("gemini") {
+			return "gemini"
+		}
+	}
+	if strings.HasPrefix(modelLower, "gpt-") {
+		if has("codex") {
+			return "codex"
+		}
+		if has("openai") {
+			return "openai"
+		}
+	}
+	if strings.HasPrefix(modelLower, "deepseek-") {
+		if has("openai") {
+			return "openai"
+		}
+		if has("deepseek") {
+			return "deepseek"
+		}
+	}
+	if strings.HasPrefix(modelLower, "grok-") || strings.HasPrefix(modelLower, "xai-") {
+		if has("xai") {
+			return "xai"
+		}
+		if has("openai") {
+			return "openai"
+		}
+	}
+
+	if has("openai") {
+		return "openai"
+	}
+	if len(availableProviders) > 0 {
+		return availableProviders[0]
+	}
+	return "openai"
+}
+
 func isEffortLevel(val string) bool {
 	switch val {
 	case "none", "low", "medium", "high", "xhigh", "max":

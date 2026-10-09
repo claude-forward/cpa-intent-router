@@ -62,10 +62,11 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	// 2. 轮次亲和性锁定：同一个 Turn 内部的多步工具交互（Tool Result）严格锁定在初始选择的模型
 	if feat.Within && sessionKey != "" {
 		if dec, found := r.sessions.GetDecision(sessionKey, now); found && dec.TargetModel != "" {
+			targetProvider := ResolveProvider(dec.TargetProvider, dec.TargetModel, req.AvailableProviders)
 			return pluginapi.ModelRouteResponse{
 				Handled:     true,
 				TargetKind:  pluginapi.ModelRouteTargetProvider,
-				Target:      dec.TargetProvider,
+				Target:      targetProvider,
 				TargetModel: dec.TargetModel,
 				Reason:      "affinity:tool_turn_held",
 			}
@@ -106,9 +107,10 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 			if targetModel == "" {
 				continue
 			}
+			targetProvider := ResolveProvider(provider, targetModel, req.AvailableProviders)
 			if sessionKey != "" {
 				r.sessions.SetDecision(sessionKey, TurnDecision{
-					TargetProvider: provider,
+					TargetProvider: targetProvider,
 					TargetModel:    targetModel,
 					Intent:         ruleIntent,
 				}, now)
@@ -116,7 +118,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 			return pluginapi.ModelRouteResponse{
 				Handled:     true,
 				TargetKind:  pluginapi.ModelRouteTargetProvider,
-				Target:      provider,
+				Target:      targetProvider,
 				TargetModel: targetModel,
 				Reason:      fmt.Sprintf("rule:hit_index_%d", i+1),
 			}
@@ -131,9 +133,10 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	if fallbackChoice != "" {
 		provider, targetModel := ParseMember(fallbackChoice)
 		if targetModel != "" {
+			targetProvider := ResolveProvider(provider, targetModel, req.AvailableProviders)
 			if sessionKey != "" {
 				r.sessions.SetDecision(sessionKey, TurnDecision{
-					TargetProvider: provider,
+					TargetProvider: targetProvider,
 					TargetModel:    targetModel,
 					Intent:         currentIntent,
 				}, now)
@@ -141,7 +144,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 			return pluginapi.ModelRouteResponse{
 				Handled:     true,
 				TargetKind:  pluginapi.ModelRouteTargetProvider,
-				Target:      provider,
+				Target:      targetProvider,
 				TargetModel: targetModel,
 				Reason:      "fallback:group_default",
 			}
