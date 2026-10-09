@@ -7,60 +7,15 @@
 ## 路由架构与规则分流示意
 
 ```mermaid
-flowchart TD
-    subgraph Client ["客户端 / Agent"]
-        A["Claude Code / Codex / 你的 Agent"]
-    end
+flowchart LR
+    A["Claude Code<br/>你的 Agent"] --> B["CLIProxyAPI<br/>group/dev<br/>(智能分流)"]
 
-    subgraph Gateway ["CLIProxyAPI 插件 ModelRouter ABI"]
-        B["虚拟路由组 group/dev"]
-        S{"同轮工具交互 Tool Result ?"}
-        Lock["锁定首轮模型（保持会话亲和）"]
-    end
-
-    subgraph RuleChain ["rules 分流规则链（从上到下顺序匹配，首个命中即终止）"]
-        R1{"规则 1: tokens ≥ 200k ?"}
-        R2{"规则 2: images = true ?"}
-        R3{"规则 3: effort = high ?"}
-        R4{"规则 4: compact 压缩 ?"}
-        R5{"规则 5: intent 意图匹配 ?"}
-        Fallback["兜底模型 fallback"]
-    end
-
-    subgraph ClassifierEngine ["小模型意图分类（宿主内部 RPC）"]
-        RPC["宿主原生 host.model.execute<br/>零网络开销 / 进程内直接执行"]
-        C["Classifier 小模型<br/>gemini-2.5-flash"]
-        Cache[("10分钟 SHA-256 缓存<br/>+ Singleflight 防重")]
-    end
-
-    subgraph Targets ["目标模型池"]
-        M1["gemini-2.5-pro<br/>超长上下文"]
-        M2["qwen-vl-max<br/>多模态模型"]
-        M3["claude-3-7-sonnet:high<br/>深度推理思考"]
-        M4["deepseek-flash<br/>低成本会话压缩"]
-        M5["deepseek-chat<br/>轻量快速问答"]
-        M_FB["claude-3-7-sonnet<br/>默认主力模型"]
-    end
-
-    A -->|"请求 group/dev"| B
-    B --> S
-    S -- "是 (同一Turn交互)" --> Lock
-    S -- "否 (新对话轮次)" --> R1
-
-    R1 -- "命中" --> M1
-    R1 -- "未命中" --> R2
-    R2 -- "命中" --> M2
-    R2 -- "未命中" --> R3
-    R3 -- "命中" --> M3
-    R3 -- "未命中" --> R4
-    R4 -- "命中" --> M4
-    R4 -- "未命中" --> R5
-
-    R5 -- "需要意图判别" --> RPC
-    RPC --> Cache --> C
-    C -- "命中 quick question" --> M5
-
-    R5 -- "未命中/无意图" --> Fallback --> M_FB
+    B -->|"规则 1: effort=high"| M1["claude-3-7-sonnet:high<br/>复杂架构 / 深度推理"]
+    B -->|"规则 2: tokens ≥ 200k"| M2["gemini-2.5-pro<br/>超长上下文分析"]
+    B -->|"规则 3: intent='quick question'"| M3["deepseek-chat<br/>轻量快速问答"]
+    B -->|"规则 4: images=true"| M4["qwen-vl-max<br/>多模态视觉识别"]
+    B -->|"规则 5: compact=true"| M5["deepseek-flash<br/>会话压缩总结"]
+    B -.->|"兜底 fallback"| M0["claude-3-7-sonnet<br/>默认主力模型"]
 ```
 
 ---
