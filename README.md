@@ -6,83 +6,61 @@
 
 ## 路由架构与规则分流示意
 
-```text
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  [按意图]   [按规则]   [超长上下文]   [多模态]   [思考深度]   智能决策：首轮解析分流规则链与意图，同轮工具调用严格锁定         │
-├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                                                                │
-│   ┌─────────────────┐             ┌───────────────────────┐         【rules 分流规则链（从上到下顺序评估，首条命中即终止）】   │
-│   │   Claude Code   │             │      CLIProxyAPI      │                                                                │
-│   │      Codex      │ ──────────► │   cpa-intent-router   │ ───────► 规则 1: tokens ≥ 200k ───────► gemini-2.5-pro (超长文本) │
-│   │    OpenCode     │             │                       │ ───────► 规则 2: images = true ───────► qwen-vl-max (视觉模态)   │
-│   │   你的 Agent    │             │   虚拟组: group/dev   │ ───────► 规则 3: effort = high ───────► claude-3-7-sonnet:high │
-│   └─────────────────┘             │                       │ ───────► 规则 4: compact = true ──────► deepseek-flash (会话压缩)│
-│                                   │   [宿主内部原生 RPC]  │ ───────► 规则 5: intent="quick question"                       │
-│                                   │   host.model.execute  │              │ (宿主内部 RPC 极简调用 classifier 小模型)       │
-│                                   │           │           │              └────────────────────────► deepseek-chat (快速问答) │
-│                                   │           ▼           │                                                                │
-│                                   │    gemini-2.5-flash   │ ───────► [全部未命中兜底 fallback] ───► claude-3-7-sonnet (主力)   │
-│                                   └───────────────────────┘                                                                    │
-│                                                                                                                                │
-│   客户端向虚拟模型 group/dev 发起请求，插件按顺序匹配 rules 规则分流；同轮多步工具交互自动锁定同一模型，防止会话漂移。         │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
 ```mermaid
 flowchart TD
-    subgraph Client [客户端 / Agent]
-        A[Claude Code / Codex / 你的 Agent]
+    subgraph Client ["客户端 / Agent"]
+        A["Claude Code / Codex / 你的 Agent"]
     end
 
-    subgraph Gateway [CLIProxyAPI + 插件 (ModelRouter ABI)]
-        B[虚拟路由组 group/dev]
-        S{同轮工具交互<br/>Tool Result ?}
-        Lock[锁定首轮模型<br/>保持会话亲和]
+    subgraph Gateway ["CLIProxyAPI 插件 ModelRouter ABI"]
+        B["虚拟路由组 group/dev"]
+        S{"同轮工具交互 Tool Result ?"}
+        Lock["锁定首轮模型（保持会话亲和）"]
     end
 
-    subgraph RuleChain [rules 分流规则链（从上到下顺序匹配，首个命中即终止）]
-        R1{规则 1: tokens ≥ 200k ?}
-        R2{规则 2: images = true ?}
-        R3{规则 3: effort = high ?}
-        R4{规则 4: compact 压缩 ?}
-        R5{规则 5: intent 意图匹配 ?}
-        Fallback[兜底模型 fallback]
+    subgraph RuleChain ["rules 分流规则链（从上到下顺序匹配，首个命中即终止）"]
+        R1{"规则 1: tokens ≥ 200k ?"}
+        R2{"规则 2: images = true ?"}
+        R3{"规则 3: effort = high ?"}
+        R4{"规则 4: compact 压缩 ?"}
+        R5{"规则 5: intent 意图匹配 ?"}
+        Fallback["兜底模型 fallback"]
     end
 
-    subgraph ClassifierEngine [小模型意图分类（宿主内部 RPC）]
-        RPC[宿主原生 host.model.execute<br/>零网络开销 / 进程内直接执行]
-        C[Classifier 小模型<br/>gemini-2.5-flash]
-        Cache[(10分钟 SHA-256 缓存<br/>+ Singleflight 防重)]
+    subgraph ClassifierEngine ["小模型意图分类（宿主内部 RPC）"]
+        RPC["宿主原生 host.model.execute<br/>零网络开销 / 进程内直接执行"]
+        C["Classifier 小模型<br/>gemini-2.5-flash"]
+        Cache[("10分钟 SHA-256 缓存<br/>+ Singleflight 防重")]
     end
 
-    subgraph Targets [目标模型池]
-        M1[gemini-2.5-pro<br/>超长上下文]
-        M2[qwen-vl-max<br/>多模态模型]
-        M3[claude-3-7-sonnet:high<br/>深度推理思考]
-        M4[deepseek-flash<br/>低成本会话压缩]
-        M5[deepseek-chat<br/>轻量快速问答]
-        M_FB[claude-3-7-sonnet<br/>默认主力模型]
+    subgraph Targets ["目标模型池"]
+        M1["gemini-2.5-pro<br/>超长上下文"]
+        M2["qwen-vl-max<br/>多模态模型"]
+        M3["claude-3-7-sonnet:high<br/>深度推理思考"]
+        M4["deepseek-flash<br/>低成本会话压缩"]
+        M5["deepseek-chat<br/>轻量快速问答"]
+        M_FB["claude-3-7-sonnet<br/>默认主力模型"]
     end
 
-    A -->|请求 group/dev| B
+    A -->|"请求 group/dev"| B
     B --> S
-    S -- 是 (同一Turn交互) --> Lock
-    S -- 否 (新对话轮次) --> R1
+    S -- "是 (同一Turn交互)" --> Lock
+    S -- "否 (新对话轮次)" --> R1
 
-    R1 -- 命中 --> M1
-    R1 -- 未命中 --> R2
-    R2 -- 命中 --> M2
-    R2 -- 未命中 --> R3
-    R3 -- 命中 --> M3
-    R3 -- 未命中 --> R4
-    R4 -- 命中 --> M4
-    R4 -- 未命中 --> R5
+    R1 -- "命中" --> M1
+    R1 -- "未命中" --> R2
+    R2 -- "命中" --> M2
+    R2 -- "未命中" --> R3
+    R3 -- "命中" --> M3
+    R3 -- "未命中" --> R4
+    R4 -- "命中" --> M4
+    R4 -- "未命中" --> R5
 
-    R5 -- 需要意图判别 --> RPC
+    R5 -- "需要意图判别" --> RPC
     RPC --> Cache --> C
-    C -- 命中 quick question --> M5
+    C -- "命中 quick question" --> M5
 
-    R5 -- 未命中/无意图 --> Fallback --> M_FB
+    R5 -- "未命中/无意图" --> Fallback --> M_FB
 ```
 
 ---
