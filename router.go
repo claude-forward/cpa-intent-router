@@ -16,6 +16,7 @@ type Router struct {
 	cfg        PluginConfig
 	sessions   *SessionTracker
 	classifier *ClassifierClient
+	systemOne  *SystemOneClient
 	caller     HostModelCaller
 	hostModels map[string]string
 }
@@ -26,6 +27,7 @@ func NewRouter(cfg PluginConfig, caller HostModelCaller) *Router {
 		cfg:        cfg,
 		sessions:   NewSessionTracker(1 * time.Hour),
 		classifier: NewClassifierClient(caller),
+		systemOne:  NewSystemOneClient(cfg.SystemOne),
 		caller:     caller,
 		hostModels: LoadHostModelMappings(""),
 	}
@@ -38,6 +40,7 @@ func (r *Router) UpdateConfig(cfg PluginConfig) {
 	defer r.mu.Unlock()
 	r.cfg = cfg
 	r.classifier = NewClassifierClient(r.caller)
+	r.systemOne = NewSystemOneClient(cfg.SystemOne)
 	r.hostModels = LoadHostModelMappings("")
 }
 
@@ -53,6 +56,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	r.mu.RLock()
 	cfg := r.cfg
 	classifierClient := r.classifier
+	systemOneClient := r.systemOne
 	hostModels := r.hostModels
 	r.mu.RUnlock()
 
@@ -96,11 +100,24 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		if group.Classifier != "" && feat.UserText != "" {
 			candidateIntents := collectCandidateIntents(group.Rules, feat)
 			if len(candidateIntents) > 0 {
-				classifierCtx, cancel := context.WithTimeout(ctx, defaultClassifierTimeout)
-				detected, errClassify := classifierClient.Classify(classifierCtx, group.Classifier, candidateIntents, feat.UserText)
-				cancel()
-				if errClassify == nil && detected != "" {
-					currentIntent = detected
+				// 配置了外部 System One 分类器时优先直连 POST /v1/systemone；
+				// 未配置或调用失败（返回空意图）时回退到宿主内部 host.model.execute 调用
+				if systemOneClient != nil && systemOneClient.Enabled() {
+					model := systemOneClient.Model(group.Classifier)
+					classifierCtx, cancel := context.WithTimeout(ctx, systemOneClient.Timeout())
+					detected, errClassify := systemOneClient.Classify(classifierCtx, model, candidateIntents, feat.UserText)
+					cancel()
+					if errClassify == nil && detected != "" {
+						currentIntent = detected
+					}
+				}
+				if currentIntent == "" {
+					classifierCtx, cancel := context.WithTimeout(ctx, defaultClassifierTimeout)
+					detected, errClassify := classifierClient.Classify(classifierCtx, group.Classifier, candidateIntents, feat.UserText)
+					cancel()
+					if errClassify == nil && detected != "" {
+						currentIntent = detected
+					}
 				}
 			}
 		}

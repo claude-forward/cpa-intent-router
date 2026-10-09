@@ -1,13 +1,23 @@
 # cpa-intent-router 插件配置文件示例
 #
-# 插件作为 CLIProxyAPI 内部 C ABI 动态库加载，小模型意图分类通过内部进程内 RPC
-# (host.model.execute) 统一调用，无需配置任何外部 HTTP 地址或 API 密钥。
+# 插件作为 CLIProxyAPI 内部 C ABI 动态库加载。小模型意图分类默认通过内部进程内 RPC
+# (host.model.execute) 调用，无需配置任何外部 HTTP 地址或 API 密钥；也可在下方配置
+# 外部 System One 决策模型分类器（Jev / Clef，POST /v1/systemone）以获得毫秒级判定。
 
 # 是否启用意图路由插件（默认 true）
 enabled: true
 
 # 可选：如果希望将路由组配置与主配置隔离，可指定外部独立配置文件路径（支持 YAML / JSON）
 # config_file: "groups.yaml"
+
+# 可选：外部 System One 决策模型分类器（Jev / Clef 等，POST /v1/systemone）
+# 配置后优先直连该端点判定意图；未配置或调用失败时自动回退到宿主内部 host.model.execute
+# systemone:
+#   type: "systemone"                        # 分类器类型，可省略（填写 endpoint/url 时默认 systemone）
+#   endpoint: "https://api.typesafe.ai/v1/systemone"  # 完整服务地址，也可写为 url
+#   api_key: "$TYPESAFE_API_KEY"             # 访问密钥，支持 $VAR / ${VAR} 环境变量展开
+#   model: "jev"                             # 可选决策模型名，省略时使用组的 classifier 字段
+#   timeout: "2s"                            # 可选单次请求超时，省略时默认 3s
 
 # 虚拟路由组（Routing Groups）定义列表
 groups:

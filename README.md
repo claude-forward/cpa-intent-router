@@ -78,7 +78,9 @@ curl -X POST http://<host>:<port>/v1/messages \
 1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口，自动注册至 `/v1/models`。
 2. **两阶段动态规则分流（rules 规则链，支持惰性求值）**：
    - **第一阶段（零额外开销静态规则）**：优先匹配 Token 估算阈值、多模态图片输入、推理思考深度要求（`effort`）、客户端标识（`agents`）、会话压缩标志（`compact`）及时间窗口。静态规则命中时**直接分流返回，零网络调用、零延迟**。
-   - **第二阶段（宿主内部小模型极简意图分类）**：自然语言意图规则（`intent`）位于静态规则之后、兜底 fallback 之前。当前序静态规则均未命中时，才按需触发宿主进程内原生 RPC（`host.model.execute`）调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重，**无需配置任何外部 HTTP 地址或 API Key**）。
+   - **第二阶段（小模型极简意图分类）**：自然语言意图规则（`intent`）位于静态规则之后、兜底 fallback 之前。当前序静态规则均未命中时，才按需触发分类判定，支持两种后端：
+     - **宿主内部小模型（默认）**：通过宿主进程内原生 RPC（`host.model.execute`）调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重，**无需配置任何外部 HTTP 地址或 API Key**）。
+     - **外部 System One 决策模型（可选）**：配置 `systemone` 段后直连 Jev / Clef 等 `POST /v1/systemone` 端点，构造 `choice` 问题并解析响应 `results.selected`，实现毫秒级确定性判定；未配置或调用失败时自动回退到宿主内部小模型。
    - **第三阶段（全局兜底 fallback）**：当意图分类亦未命中时，平滑落入组配置的兜底模型。
 3. **轮次亲和性锁定（Turn Affinity Locking）**：精准识别多步工具交互轮次（Tool Call / Tool Result），同一轮次交互严格锁定在首轮选定模型，防止模型漂移。
 
@@ -105,6 +107,15 @@ plugins:
     cpa-intent-router:
       enabled: true                     # 是否启用意图路由插件（默认 true）
 
+      # 可选：外部 System One 决策模型分类器（Jev / Clef 等，POST /v1/systemone）
+      # 配置后优先直连该端点判定意图；未配置或调用失败时自动回退到宿主内部 host.model.execute
+      systemone:
+        type: "systemone"                        # 分类器类型，可省略（填写 endpoint/url 时默认 systemone）
+        endpoint: "https://api.typesafe.ai/v1/systemone"  # 完整服务地址，也可写为 url
+        api_key: "$TYPESAFE_API_KEY"             # 访问密钥，支持 $VAR / ${VAR} 环境变量展开
+        model: "jev"                             # 可选决策模型名，省略时使用组的 classifier 字段
+        timeout: "2s"                            # 可选单次请求超时，省略时默认 3s
+
       # 虚拟路由组定义
       groups:
         - id: "opus-anywhere"           # 组唯一标识，客户端请求写为 "group/opus-anywhere" 或 "opus-anywhere"
@@ -113,7 +124,7 @@ plugins:
             - "openrouter/google/gemini-2.5-pro"
             - "deepseek-chat"
             - "claude/claude-3-7-sonnet"
-          classifier: "gemini/gemini-2.5-flash" # 前置意图分类小模型（宿主内部 RPC 直接调用）
+          classifier: "gemini/gemini-2.5-flash" # 分类模型：System One 模式下作为 model 回退值，否则为宿主内部 RPC 小模型
           fallback: "claude/claude-3-7-sonnet"  # 兜底模型：所有规则未命中时生效
 
           # rules: 分流匹配规则链（从上到下顺序匹配，首个完全命中即生效）

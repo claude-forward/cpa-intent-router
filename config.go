@@ -20,8 +20,63 @@ type PluginConfig struct {
 	// ConfigFile 可选：从独立外部文件加载组与规则配置（支持 YAML/JSON）
 	ConfigFile string `json:"config_file,omitempty" yaml:"config_file,omitempty"`
 
+	// SystemOne 可选：外部 System One 决策模型分类器配置（如 Jev / Clef，POST /v1/systemone）
+	// 未配置时回退到宿主内部 host.model.execute 调用轻量模型判别
+	SystemOne *ClassifierConfig `json:"systemone,omitempty" yaml:"systemone,omitempty"`
+
 	// Groups 路由组定义列表
 	Groups []GroupConfig `json:"groups,omitempty" yaml:"groups,omitempty"`
+}
+
+// ClassifierConfig 外部 System One 决策模型分类器配置（POST /v1/systemone）
+type ClassifierConfig struct {
+	// Type 分类器类型，目前支持 "systemone"（Jev / Clef 等 System One 协议端点）
+	// 省略时若已填写 endpoint/url 则默认按 "systemone" 处理
+	Type string `json:"type,omitempty" yaml:"type,omitempty"`
+
+	// Endpoint System One 服务完整地址，也可写为 url（如 "https://api.typesafe.ai/v1/systemone"）
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+
+	// APIKey 访问密钥，支持 $VAR / ${VAR} 环境变量展开（如 "$TYPESAFE_API_KEY"）
+	APIKey string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+
+	// Model 可选决策模型名（如 "jev"、"clef-flash"），留空时采用组的 classifier 字段
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// Timeout 可选单次分类请求超时，支持 Go duration 写法（如 "2s"），留空时使用默认超时
+	Timeout time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+}
+
+// UnmarshalYAML 解析 systemone 配置，支持 url 别名与 duration 字符串形式的 timeout
+func (c *ClassifierConfig) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Type     string `yaml:"type"`
+		Endpoint string `yaml:"endpoint"`
+		URL      string `yaml:"url"`
+		APIKey   string `yaml:"api_key"`
+		Model    string `yaml:"model"`
+		Timeout  string `yaml:"timeout"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	c.Type = raw.Type
+	c.Endpoint = raw.Endpoint
+	if strings.TrimSpace(c.Endpoint) == "" {
+		c.Endpoint = raw.URL
+	}
+	c.APIKey = raw.APIKey
+	c.Model = raw.Model
+	c.Timeout = 0
+	if timeout := strings.TrimSpace(raw.Timeout); timeout != "" {
+		d, err := time.ParseDuration(timeout)
+		if err != nil {
+			return fmt.Errorf("invalid systemone timeout %q: %w", timeout, err)
+		}
+		c.Timeout = d
+	}
+	return nil
 }
 
 // GroupConfig 虚拟路由组配置
@@ -92,6 +147,9 @@ type TimeWindow struct {
 	Days []string `json:"days,omitempty" yaml:"days,omitempty"`
 }
 
+// ClassifierTypeSystemOne 标识直连 Jev / Clef 等 System One 协议端点（POST /v1/systemone）的分类器类型
+const ClassifierTypeSystemOne = "systemone"
+
 func defaultPluginConfig() PluginConfig {
 	return PluginConfig{
 		Enabled: true,
@@ -151,6 +209,16 @@ func loadExternalConfigFile(cfg *PluginConfig) error {
 }
 
 func normalizeConfig(cfg *PluginConfig) {
+	if cfg.SystemOne != nil {
+		cfg.SystemOne.Type = strings.ToLower(strings.TrimSpace(cfg.SystemOne.Type))
+		if cfg.SystemOne.Type == "" && strings.TrimSpace(cfg.SystemOne.Endpoint) != "" {
+			cfg.SystemOne.Type = ClassifierTypeSystemOne
+		}
+		cfg.SystemOne.Endpoint = strings.TrimSpace(cfg.SystemOne.Endpoint)
+		cfg.SystemOne.APIKey = strings.TrimSpace(cfg.SystemOne.APIKey)
+		cfg.SystemOne.Model = strings.TrimSpace(cfg.SystemOne.Model)
+	}
+
 	for i := range cfg.Groups {
 		g := &cfg.Groups[i]
 		g.ID = strings.TrimSpace(g.ID)

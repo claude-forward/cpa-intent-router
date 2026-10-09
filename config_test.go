@@ -47,6 +47,75 @@ groups:
 	}
 }
 
+func TestDecodeConfig_SystemOne(t *testing.T) {
+	raw := []byte(`
+enabled: true
+systemone:
+  type: "systemone"
+  url: "https://api.typesafe.ai/v1/systemone"
+  api_key: "$TYPESAFE_API_KEY"
+  model: "jev"
+  timeout: "2s"
+groups:
+  - id: "dev"
+    members: ["deepseek-chat"]
+    classifier: "group-classifier"
+    rules:
+      - use: "deepseek-chat"
+        intent: "quick question"
+`)
+
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		t.Fatalf("decodeConfig failed: %v", err)
+	}
+	if cfg.SystemOne == nil {
+		t.Fatalf("expected SystemOne config to be parsed")
+	}
+	if cfg.SystemOne.Type != ClassifierTypeSystemOne {
+		t.Errorf("expected type %s, got %s", ClassifierTypeSystemOne, cfg.SystemOne.Type)
+	}
+	if cfg.SystemOne.Endpoint != "https://api.typesafe.ai/v1/systemone" {
+		t.Errorf("expected url alias to populate endpoint, got %q", cfg.SystemOne.Endpoint)
+	}
+	if cfg.SystemOne.APIKey != "$TYPESAFE_API_KEY" {
+		t.Errorf("expected api_key preserved for later expansion, got %q", cfg.SystemOne.APIKey)
+	}
+	if cfg.SystemOne.Model != "jev" {
+		t.Errorf("expected model jev, got %q", cfg.SystemOne.Model)
+	}
+	if cfg.SystemOne.Timeout != 2*time.Second {
+		t.Errorf("expected timeout 2s, got %s", cfg.SystemOne.Timeout)
+	}
+}
+
+func TestDecodeConfig_SystemOneDefaultsTypeFromEndpoint(t *testing.T) {
+	raw := []byte(`
+systemone:
+  endpoint: "https://api.typesafe.ai/v1/systemone"
+`)
+
+	cfg, err := decodeConfig(raw)
+	if err != nil {
+		t.Fatalf("decodeConfig failed: %v", err)
+	}
+	if cfg.SystemOne == nil || cfg.SystemOne.Type != ClassifierTypeSystemOne {
+		t.Fatalf("expected endpoint to imply systemone type, got %+v", cfg.SystemOne)
+	}
+}
+
+func TestDecodeConfig_SystemOneInvalidTimeout(t *testing.T) {
+	raw := []byte(`
+systemone:
+  endpoint: "https://api.typesafe.ai/v1/systemone"
+  timeout: "not-a-duration"
+`)
+
+	if _, err := decodeConfig(raw); err == nil {
+		t.Fatalf("expected error for invalid timeout")
+	}
+}
+
 func TestParseMember(t *testing.T) {
 	tests := []struct {
 		input        string

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -170,5 +172,124 @@ func TestRouter_IntentClassification(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("expected 1 classifier call, got %d", callCount)
+	}
+}
+
+func TestRouter_SystemOneClassifier(t *testing.T) {
+	var gotInput string
+	var gotOptions []any
+	systemOneCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		systemOneCalls++
+		var body map[string]any
+		if errDecode := json.NewDecoder(r.Body).Decode(&body); errDecode != nil {
+			t.Errorf("decode systemone body: %v", errDecode)
+		}
+		gotInput, _ = body["input"].(string)
+		questions, _ := body["questions"].([]any)
+		if len(questions) == 1 {
+			if q, ok := questions[0].(map[string]any); ok {
+				gotOptions, _ = q["options"].([]any)
+			}
+		}
+		_, _ = w.Write([]byte(`{"results":{"intent":{"selected":"simple question"}}}`))
+	}))
+	defer server.Close()
+
+	hostCallCount := 0
+	mockCaller := func(ctx context.Context, model string, body []byte) ([]byte, error) {
+		hostCallCount++
+		return []byte(`{"choices":[{"message":{"content":"1"}}]}`), nil
+	}
+
+	cfg := PluginConfig{
+		Enabled: true,
+		SystemOne: &ClassifierConfig{
+			Endpoint: server.URL + "/v1/systemone",
+		},
+		Groups: []GroupConfig{
+			{
+				ID:         "systemone-group",
+				Classifier: "group-classifier",
+				Members:    []string{"deepseek-chat", "claude/"},
+				Rules: []RuleConfig{
+					{
+						Use:    "deepseek-chat",
+						Intent: "simple question",
+					},
+				},
+				Fallback: "claude/",
+			},
+		},
+	}
+
+	router := NewRouter(cfg, mockCaller)
+	req := pluginapi.ModelRouteRequest{
+		RequestedModel: "group/systemone-group",
+		Body:           []byte(`{"messages":[{"role":"user","content":"what is 1+1?"}]}`),
+	}
+	resp := router.RouteModel(context.Background(), req)
+	if !resp.Handled || resp.TargetModel != "deepseek-chat" {
+		t.Fatalf("expected systemone-routed intent to pick deepseek-chat, got %+v", resp)
+	}
+	if systemOneCalls != 1 {
+		t.Errorf("expected 1 systemone call, got %d", systemOneCalls)
+	}
+	if hostCallCount != 0 {
+		t.Errorf("expected host.model.execute fallback untouched, got %d calls", hostCallCount)
+	}
+	if gotInput != "what is 1+1?" {
+		t.Errorf("expected user text forwarded as input, got %q", gotInput)
+	}
+	if len(gotOptions) != 1 || gotOptions[0] != "simple question" {
+		t.Errorf("expected candidate intents as options, got %v", gotOptions)
+	}
+}
+
+func TestRouter_SystemOneFallsBackToHostCaller(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	hostCallCount := 0
+	mockCaller := func(ctx context.Context, model string, body []byte) ([]byte, error) {
+		hostCallCount++
+		return []byte(`{"choices":[{"message":{"content":"1"}}]}`), nil
+	}
+
+	cfg := PluginConfig{
+		Enabled: true,
+		SystemOne: &ClassifierConfig{
+			Endpoint: server.URL + "/v1/systemone",
+		},
+		Groups: []GroupConfig{
+			{
+				ID:         "fallback-group",
+				Classifier: "group-classifier",
+				Members:    []string{"deepseek-chat", "claude/"},
+				Rules: []RuleConfig{
+					{
+						Use:    "deepseek-chat",
+						Intent: "simple question",
+					},
+				},
+				Fallback: "claude/",
+			},
+		},
+	}
+
+	router := NewRouter(cfg, mockCaller)
+	req := pluginapi.ModelRouteRequest{
+		RequestedModel: "group/fallback-group",
+		Body:           []byte(`{"messages":[{"role":"user","content":"what is 1+1?"}]}`),
+	}
+	resp := router.RouteModel(context.Background(), req)
+	if !resp.Handled || resp.TargetModel != "deepseek-chat" {
+		t.Fatalf("expected host fallback to pick deepseek-chat, got %+v", resp)
+	}
+	if hostCallCount != 1 {
+		t.Errorf("expected 1 host.model.execute fallback call, got %d", hostCallCount)
 	}
 }
