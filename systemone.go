@@ -102,6 +102,11 @@ func (c *SystemOneClient) Classify(ctx context.Context, model string, intents []
 
 	optionsWithNone := append(append([]string(nil), intents...), noneIntentOption)
 
+	criteriaMap := make(map[string]any, len(optionsWithNone))
+	for _, opt := range optionsWithNone {
+		criteriaMap[opt] = "Category for " + opt
+	}
+
 	reqBody := map[string]any{
 		"state": userText,
 		"input": userText,
@@ -109,13 +114,15 @@ func (c *SystemOneClient) Classify(ctx context.Context, model string, intents []
 			systemOneQuestionName: map[string]any{
 				"type":         "choice",
 				"instructions": "Classify the user input into the single best matching intent, or choose none_of_the_above if no intent is relevant.",
-				"criteria":     optionsWithNone,
+				"criteria":     criteriaMap,
 				"options":      optionsWithNone,
 			},
 		},
 	}
 	if model != "" {
 		reqBody["model"] = model
+	} else if strings.Contains(c.endpoint, "@cf/") || strings.Contains(c.endpoint, "cloudflare") {
+		reqBody["model"] = "clef-flash"
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -156,7 +163,13 @@ func (c *SystemOneClient) Classify(ctx context.Context, model string, intents []
 
 	selected := gjson.GetBytes(respBytes, "answers."+systemOneQuestionName+".choice").String()
 	if selected == "" {
+		selected = gjson.GetBytes(respBytes, "result.answers."+systemOneQuestionName+".choice").String()
+	}
+	if selected == "" {
 		selected = gjson.GetBytes(respBytes, "results."+systemOneQuestionName+".selected").String()
+	}
+	if selected == "" {
+		selected = gjson.GetBytes(respBytes, "result.results."+systemOneQuestionName+".selected").String()
 	}
 	if selected == "" {
 		selected = gjson.GetBytes(respBytes, "answers.0.choice").String()
