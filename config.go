@@ -212,26 +212,15 @@ func ParseMember(member string) (provider, targetModel string) {
 
 // ResolveProvider 解析目标模型对应的有效 Provider。
 // 优先级：
-// 1. 若配置中已显式指定（如 "antigravity/claude-sonnet-4-6" 或 "openai-compatibility/deepseek-flash"），直接采用；
+// 1. 若配置中已显式指定（如 "antigravity/claude-sonnet-4-6"、"codex/gpt-6.1-sol"、"kenari/deepseek-flash"），优先采用并映射到真实 Provider 标识；
 // 2. 若未显式指定（如 "deepseek-flash"），优先在宿主全局配置动态映射表中查找匹配的 Provider；
-// 3. 若映射表未收录（如 OAuth 动态挂载凭据），结合宿主传入的 availableProviders 智能兜底；
-// 确保 Target 永不为空（避免触发宿主 invalid target 拒绝）。
+// 3. 若映射表未收录（如 OAuth 动态挂载凭据），结合宿主传入的 availableProviders 智能匹配；
+// 确保 Target 永不为空且存在于 availableProviders 中（避免触发宿主 unavailable provider / invalid target 拒绝）。
 func ResolveProvider(specifiedProvider, model string, modelMappings map[string]string, availableProviders []string) string {
 	specifiedProvider = strings.ToLower(strings.TrimSpace(specifiedProvider))
-	if specifiedProvider != "" {
-		return specifiedProvider
-	}
-
 	modelLower := strings.ToLower(strings.TrimSpace(model))
 	if idx := strings.Index(modelLower, "("); idx != -1 {
 		modelLower = strings.TrimSpace(modelLower[:idx])
-	}
-
-	// 1. 优先查宿主主配置动态映射表（按宿主实际绑定的 provider 返回）
-	if modelMappings != nil {
-		if p, ok := modelMappings[modelLower]; ok && p != "" {
-			return p
-		}
 	}
 
 	has := func(p string) bool {
@@ -243,7 +232,48 @@ func ResolveProvider(specifiedProvider, model string, modelMappings map[string]s
 		return false
 	}
 
-	// 2. 若宿主主配置 API key 段未声明，但通过 OAuth (如 Antigravity / Codex) 接入
+	// 1. 若用户在规则中显式指定了 provider
+	if specifiedProvider != "" {
+		if has(specifiedProvider) {
+			return specifiedProvider
+		}
+		compatKey := "openai-compatible-" + specifiedProvider
+		if has(compatKey) {
+			return compatKey
+		}
+		if specifiedProvider == "openai-compatibility" {
+			if modelMappings != nil {
+				if p, ok := modelMappings[modelLower]; ok && strings.HasPrefix(p, "openai-compatible-") && has(p) {
+					return p
+				}
+			}
+			for _, ap := range availableProviders {
+				if strings.HasPrefix(strings.ToLower(ap), "openai-compatible-") {
+					return ap
+				}
+			}
+		}
+		return specifiedProvider
+	}
+
+	// 2. 未显式指定 provider（如 use: "deepseek-flash" 或 use: "claude-sonnet-4-6"）
+	// 2a. 优先从宿主配置模型映射表中查出该模型所属的实际 provider
+	if modelMappings != nil {
+		if p, ok := modelMappings[modelLower]; ok && p != "" {
+			if has(p) {
+				return p
+			}
+			if p == "openai-compatibility" {
+				for _, ap := range availableProviders {
+					if strings.HasPrefix(strings.ToLower(ap), "openai-compatible-") {
+						return ap
+					}
+				}
+			}
+		}
+	}
+
+	// 2b. 常见模型前缀与凭据类型智能匹配（如 OAuth 动态凭据模型）
 	if strings.HasPrefix(modelLower, "claude-") || strings.HasPrefix(modelLower, "gemini-") {
 		if has("antigravity") {
 			return "antigravity"
@@ -269,7 +299,12 @@ func ResolveProvider(specifiedProvider, model string, modelMappings map[string]s
 		}
 	}
 
-	// 3. 兜底回退
+	// 2c. 兜底策略：若为 openai-compatible-* 模型，优先选取
+	for _, ap := range availableProviders {
+		if strings.HasPrefix(strings.ToLower(ap), "openai-compatible-") {
+			return ap
+		}
+	}
 	if has("openai-compatibility") {
 		return "openai-compatibility"
 	}
@@ -348,7 +383,20 @@ func ParseHostModelMappingsFromYAML(data []byte) map[string]string {
 		var provider string
 		switch key {
 		case "openai-compatibility":
-			provider = "openai-compatibility"
+			if valNode.Kind == yaml.SequenceNode {
+				for _, item := range valNode.Content {
+					compatName := extractMappingField(item, "name")
+					itemProvider := "openai-compatibility"
+					if compatName != "" {
+						itemProvider = "openai-compatible-" + strings.ToLower(compatName)
+					}
+					extractModelsFromYAMLNode(item, itemProvider, mappings)
+					if compatName != "" {
+						mappings["__compat__"+strings.ToLower(compatName)] = itemProvider
+					}
+				}
+			}
+			continue
 		case "codex-api-key":
 			provider = "codex"
 		case "claude-api-key":
@@ -371,6 +419,18 @@ func ParseHostModelMappingsFromYAML(data []byte) map[string]string {
 	}
 
 	return mappings
+}
+
+func extractMappingField(node *yaml.Node, fieldName string) string {
+	if node.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		if strings.EqualFold(strings.TrimSpace(node.Content[i].Value), fieldName) {
+			return strings.TrimSpace(node.Content[i+1].Value)
+		}
+	}
+	return ""
 }
 
 func extractModelsFromYAMLNode(node *yaml.Node, provider string, mappings map[string]string) {

@@ -134,11 +134,11 @@ claude-api-key:
 		t.Fatalf("expected mappings to be parsed")
 	}
 
-	if mappings["deepseek-flash"] != "openai-compatibility" {
-		t.Errorf("expected deepseek-flash -> openai-compatibility, got %s", mappings["deepseek-flash"])
+	if mappings["deepseek-flash"] != "openai-compatible-kenari" {
+		t.Errorf("expected deepseek-flash -> openai-compatible-kenari, got %s", mappings["deepseek-flash"])
 	}
-	if mappings["deepseek-v4-flash"] != "openai-compatibility" {
-		t.Errorf("expected deepseek-v4-flash -> openai-compatibility, got %s", mappings["deepseek-v4-flash"])
+	if mappings["deepseek-v4-flash"] != "openai-compatible-kenari" {
+		t.Errorf("expected deepseek-v4-flash -> openai-compatible-kenari, got %s", mappings["deepseek-v4-flash"])
 	}
 	if mappings["gpt-6.1-sol"] != "codex" {
 		t.Errorf("expected gpt-6.1-sol -> codex, got %s", mappings["gpt-6.1-sol"])
@@ -150,14 +150,14 @@ claude-api-key:
 
 func TestResolveProvider_TwoStyles(t *testing.T) {
 	mockMappings := map[string]string{
-		"deepseek-flash": "openai-compatibility",
+		"deepseek-flash": "openai-compatible-kenari",
 	}
-	available := []string{"antigravity", "codex", "openai-compatibility"}
+	available := []string{"antigravity", "codex", "openai-compatible-kenari"}
 
-	// 风格一：纯模型名（无 Provider 前缀），通过宿主配置动态查表解析
+	// 风格一：纯模型名（无 Provider 前缀），通过宿主配置动态查表解析至对应真实 Provider
 	p1 := ResolveProvider("", "deepseek-flash", mockMappings, available)
-	if p1 != "openai-compatibility" {
-		t.Errorf("expected p1=openai-compatibility, got %s", p1)
+	if p1 != "openai-compatible-kenari" {
+		t.Errorf("expected p1=openai-compatible-kenari, got %s", p1)
 	}
 
 	// 风格二：显式指定 Provider 前缀（如 antigravity/claude-sonnet-4-6）
@@ -166,9 +166,21 @@ func TestResolveProvider_TwoStyles(t *testing.T) {
 		t.Errorf("expected p2=antigravity, got %s", p2)
 	}
 
-	// 风格三：OAuth 动态凭据模型（未在 API key 段中出现，但存在 antigravity 可用提供商）
-	p3 := ResolveProvider("", "claude-sonnet-4-6", mockMappings, available)
-	if p3 != "antigravity" {
-		t.Errorf("expected p3=antigravity, got %s", p3)
+	// 风格三：显式指定 compat 名称别名（如 kenari/deepseek-flash）
+	p3 := ResolveProvider("kenari", "deepseek-flash", mockMappings, available)
+	if p3 != "openai-compatible-kenari" {
+		t.Errorf("expected p3=openai-compatible-kenari, got %s", p3)
+	}
+
+	// 风格四：显式指定通用名称（如 openai-compatibility/deepseek-flash）
+	p4 := ResolveProvider("openai-compatibility", "deepseek-flash", mockMappings, available)
+	if p4 != "openai-compatible-kenari" {
+		t.Errorf("expected p4=openai-compatible-kenari, got %s", p4)
+	}
+
+	// 风格五：OAuth 动态凭据模型（未在 API key 段中出现，但存在 antigravity 可用提供商）
+	p5 := ResolveProvider("", "claude-sonnet-4-6", mockMappings, available)
+	if p5 != "antigravity" {
+		t.Errorf("expected p5=antigravity, got %s", p5)
 	}
 }
