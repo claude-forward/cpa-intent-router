@@ -38,7 +38,7 @@ flowchart LR
 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -buildmode=c-shared -o cpa-intent-router.so .
 ```
 
-将生成的 `cpa-intent-router.so` 放置于 CLIProxyAPI 的插件目录（如 `/data/cli/plugins/linux/amd64/`）即可随宿主自动加载。
+将生成的 `cpa-intent-router.so` 放置于 CLIProxyAPI 的插件目录（如 `plugins/linux/amd64/`）即可随宿主自动加载。
 
 ---
 

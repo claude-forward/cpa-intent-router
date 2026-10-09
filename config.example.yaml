@@ -7,7 +7,7 @@
 enabled: true
 
 # 可选：如果希望将路由组配置与主配置隔离，可指定外部独立配置文件路径（支持 YAML / JSON）
-# config_file: "/data/cli/groups.yaml"
+# config_file: "groups.yaml"
 
 # 虚拟路由组（Routing Groups）定义列表
 groups:

@@ -8,7 +8,6 @@ import (
 func TestDecodeConfig_YAML(t *testing.T) {
 	raw := []byte(`
 enabled: true
-gateway_url: "http://127.0.0.1:8080"
 groups:
   - id: "dev-team"
     name: "Dev Team Routing"
