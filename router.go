@@ -72,23 +72,36 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		}
 	}
 
-	// 3. 意图分类：当规则中有意图要求且提取到了用户输入时，通过宿主内部直接调用分类器
+	// 3. 惰性意图分类器闭包：仅当前序静态规则未命中且遇到 intent 规则时才按需触发小模型分类
 	var currentIntent string
-	if group.Classifier != "" && feat.UserText != "" {
-		candidateIntents := collectCandidateIntents(group.Rules, feat)
-		if len(candidateIntents) > 0 {
-			classifierCtx, cancel := context.WithTimeout(ctx, defaultClassifierTimeout)
-			detected, errClassify := classifierClient.Classify(classifierCtx, group.Classifier, candidateIntents, feat.UserText)
-			cancel()
-			if errClassify == nil && detected != "" {
-				currentIntent = detected
+	var classifiedDone bool
+
+	getIntent := func() string {
+		if classifiedDone {
+			return currentIntent
+		}
+		classifiedDone = true
+		if group.Classifier != "" && feat.UserText != "" {
+			candidateIntents := collectCandidateIntents(group.Rules, feat)
+			if len(candidateIntents) > 0 {
+				classifierCtx, cancel := context.WithTimeout(ctx, defaultClassifierTimeout)
+				detected, errClassify := classifierClient.Classify(classifierCtx, group.Classifier, candidateIntents, feat.UserText)
+				cancel()
+				if errClassify == nil && detected != "" {
+					currentIntent = detected
+				}
 			}
 		}
+		return currentIntent
 	}
 
 	// 4. 顺序匹配分流规则列表（首条完全命中的规则生效）
 	for i, rule := range group.Rules {
-		if MatchRule(rule, feat, currentIntent) {
+		var ruleIntent string
+		if rule.Intent != "" {
+			ruleIntent = getIntent()
+		}
+		if MatchRule(rule, feat, ruleIntent) {
 			provider, targetModel := ParseMember(rule.Use)
 			if targetModel == "" {
 				continue
@@ -97,7 +110,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 				r.sessions.SetDecision(sessionKey, TurnDecision{
 					TargetProvider: provider,
 					TargetModel:    targetModel,
-					Intent:         currentIntent,
+					Intent:         ruleIntent,
 				}, now)
 			}
 			return pluginapi.ModelRouteResponse{

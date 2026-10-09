@@ -12,9 +12,9 @@ flowchart LR
 
     B -->|"规则 1: effort=high"| M1["claude-3-7-sonnet:high<br/>复杂架构 / 深度推理"]
     B -->|"规则 2: tokens ≥ 200k"| M2["gemini-2.5-pro<br/>超长上下文分析"]
-    B -->|"规则 3: intent='quick question'"| M3["deepseek-chat<br/>轻量快速问答"]
-    B -->|"规则 4: images=true"| M4["qwen-vl-max<br/>多模态视觉识别"]
-    B -->|"规则 5: compact=true"| M5["deepseek-flash<br/>会话压缩总结"]
+    B -->|"规则 3: images=true"| M3["qwen-vl-max<br/>多模态视觉识别"]
+    B -->|"规则 4: compact=true"| M4["deepseek-flash<br/>会话压缩总结"]
+    B -->|"规则 5: intent='quick question'"| M5["deepseek-chat<br/>轻量快速问答"]
     B -.->|"兜底 fallback"| M0["claude-3-7-sonnet<br/>默认主力模型"]
 ```
 
@@ -23,9 +23,10 @@ flowchart LR
 ## 核心能力
 
 1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口，自动注册至 `/v1/models`。
-2. **两阶段动态规则分流（rules 规则链）**：
-   - **第一阶段（零额外开销静态规则）**：按 Token 估算阈值、多模态图片输入、推理思考深度要求（`effort`）、客户端标识（`agents`）、会话压缩标志（`compact`）及时间窗口进行前置匹配。
-   - **第二阶段（宿主内部小模型极简意图分类）**：支持自然语言描述意图（如 `"a quick question"`, `"writing or fixing tests"`），通过宿主进程内原生 RPC（`host.model.execute`）直接调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重，**无需配置任何外部 HTTP 地址或 API Key**）。
+2. **两阶段动态规则分流（rules 规则链，支持惰性求值）**：
+   - **第一阶段（零额外开销静态规则）**：优先匹配 Token 估算阈值、多模态图片输入、推理思考深度要求（`effort`）、客户端标识（`agents`）、会话压缩标志（`compact`）及时间窗口。静态规则命中时**直接分流返回，零网络调用、零延迟**。
+   - **第二阶段（宿主内部小模型极简意图分类）**：自然语言意图规则（`intent`）位于静态规则之后、兜底 fallback 之前。当前序静态规则均未命中时，才按需触发宿主进程内原生 RPC（`host.model.execute`）调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重，**无需配置任何外部 HTTP 地址或 API Key**）。
+   - **第三阶段（全局兜底 fallback）**：当意图分类亦未命中时，平滑落入组配置的兜底模型。
 3. **轮次亲和性锁定（Turn Affinity Locking）**：精准识别多步工具交互轮次（Tool Call / Tool Result），同一轮次交互严格锁定在首轮选定模型，防止模型漂移。
 
 ---
@@ -64,34 +65,34 @@ plugins:
 
           # rules: 分流匹配规则链（从上到下顺序匹配，首个完全命中即生效）
           rules:
-            # 1. 超长上下文分流 (Tokens >= 200,000)
-            - use: "openrouter/google/gemini-2.5-pro"
-              tokens: 200000
-
-            # 2. 多模态视觉分流 (携带图片/附件)
-            - use: "deepseek-chat"
-              images: true
-
-            # 3. 意图分类分流 (由内部 classifier 小模型判定，享 10 分钟缓存)
-            - use: "deepseek-chat"
-              intent: "a quick question"
-
-            # 4. 深度推理思考分流 (客户端要求 reasoning_effort=high 时)
+            # 1. 深度推理思考分流 (客户端要求 reasoning_effort=high 时)
             - use: "claude/claude-3-7-sonnet:high"
               effort: "high"
 
-            # 5. 会话压缩分流 (客户端触发 /compact 自动摘要时)
+            # 2. 超长上下文分流 (Tokens >= 200,000)
+            - use: "openrouter/google/gemini-2.5-pro"
+              tokens: 200000
+
+            # 3. 多模态视觉分流 (携带图片/附件)
+            - use: "deepseek-chat"
+              images: true
+
+            # 4. 会话压缩分流 (客户端触发 /compact 自动摘要时)
             - use: "deepseek-chat"
               compact: true
 
-            # 6. 时间窗口分流 (特定时段生效，支持跨午夜)
+            # 5. 时间窗口分流 (特定时段生效，支持跨午夜)
             - use: "deepseek-chat"
               time:
                 from: "14:00"
                 to: "18:00"
                 days: ["mon", "tue", "wed", "thu", "fri"]
 
-            # 7. 客户端来源分流 (根据 User-Agent 识别客户端)
+            # 6. 客户端来源分流 (根据 User-Agent 识别客户端)
             - use: "claude/claude-3-7-sonnet"
               agents: ["claude", "codex"]
+
+            # 7. 意图分类分流 (位于静态规则后、fallback 上方；前序静态规则未命中时惰性触发小模型判定)
+            - use: "deepseek-chat"
+              intent: "a quick question"
 ```

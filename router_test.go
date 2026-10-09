@@ -111,8 +111,10 @@ func TestRouter_ToolTurnAffinity(t *testing.T) {
 }
 
 func TestRouter_IntentClassification(t *testing.T) {
+	callCount := 0
 	mockCaller := func(ctx context.Context, model string, body []byte) ([]byte, error) {
-		return []byte(`{"choices":[{"message":{"content":"2"}}]}`), nil
+		callCount++
+		return []byte(`{"choices":[{"message":{"content":"1"}}]}`), nil
 	}
 
 	cfg := PluginConfig{
@@ -123,16 +125,18 @@ func TestRouter_IntentClassification(t *testing.T) {
 				Classifier: "test-classifier-model",
 				Members:    []string{"deepseek-chat", "claude/claude-3-7-sonnet"},
 				Rules: []RuleConfig{
+					// Static rule first
 					{
-						Use:    "claude/claude-3-7-sonnet",
-						Intent: "complex architecture",
+						Use:    "claude/claude-3-7-sonnet:high",
+						Tokens: 50000,
 					},
+					// Intent rule before fallback
 					{
 						Use:    "deepseek-chat",
 						Intent: "simple question",
 					},
 				},
-				Fallback: "deepseek-chat",
+				Fallback: "claude/claude-3-7-sonnet",
 			},
 		},
 	}
@@ -140,17 +144,31 @@ func TestRouter_IntentClassification(t *testing.T) {
 	router := NewRouter(cfg, mockCaller)
 	ctx := context.Background()
 
-	req := pluginapi.ModelRouteRequest{
+	// 1. Static rule hits -> mockCaller should NOT be called (Lazy evaluation)
+	hugeBody := append([]byte(`{"messages":[{"role":"user","content":"`), make([]byte, 210000)...)
+	hugeBody = append(hugeBody, []byte(`"}]}`)...)
+	reqBig := pluginapi.ModelRouteRequest{
+		RequestedModel: "group/intent-group",
+		Body:           hugeBody,
+	}
+	respBig := router.RouteModel(ctx, reqBig)
+	if !respBig.Handled || respBig.TargetModel != "claude-3-7-sonnet(high)" {
+		t.Fatalf("respBig failed: %+v", respBig)
+	}
+	if callCount != 0 {
+		t.Errorf("expected 0 classifier calls when static rule matches, got %d", callCount)
+	}
+
+	// 2. Static rule misses -> evaluates intent rule right above fallback -> invokes classifier
+	reqIntent := pluginapi.ModelRouteRequest{
 		RequestedModel: "group/intent-group",
 		Body:           []byte(`{"messages":[{"role":"user","content":"what is 1+1?"}]}`),
 	}
-
-	resp := router.RouteModel(ctx, req)
-	if !resp.Handled {
-		t.Fatalf("expected Handled=true")
+	respIntent := router.RouteModel(ctx, reqIntent)
+	if !respIntent.Handled || respIntent.TargetModel != "deepseek-chat" {
+		t.Fatalf("respIntent failed: %+v", respIntent)
 	}
-	// The mock classifier returns index 2 -> "simple question" -> routes to deepseek-chat
-	if resp.TargetModel != "deepseek-chat" {
-		t.Errorf("expected deepseek-chat, got %s", resp.TargetModel)
+	if callCount != 1 {
+		t.Errorf("expected 1 classifier call, got %d", callCount)
 	}
 }

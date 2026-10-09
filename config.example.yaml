@@ -21,40 +21,43 @@ groups:
     fallback: "claude/claude-3-7-sonnet"      # 兜底模型：当下方 rules 所有规则均未匹配命中时采用的分流目标
 
     # rules: 顺序分流匹配规则（分支路由规则链）
-    # 【匹配机制】：
+    # 【匹配机制与执行顺序】：
     # 1. 严格从上到下按顺序逐条评估，首条命中的规则直接生效并终止后续判断（First Match Wins）。
     # 2. 单条规则内部若定义了多个属性（如 tokens + images），必须全部满足才算命中（AND 逻辑）。
-    # 3. 同一轮次内部的工具调用交互（tool_call / tool_result）会自动锁定在首轮选定模型，保持会话一致性。
+    # 3. 静态物理规则（推理深度、超长文本、图片附件、会话压缩等）优先在上方评估：零调用开销、零延迟命中直接分流。
+    # 4. 自然语言意图规则（intent）位于静态规则之后、fallback 兜底之前：仅当前序静态条件均未命中时才惰性触发小模型判定。
+    # 5. 同一轮次内部的工具调用交互（tool_call / tool_result）会自动锁定在首轮选定模型，保持会话一致性。
     rules:
-      # [规则 1] 超长上下文分流：当输入估算 Token 数量达到或超过 200,000 时，分流至大上下文模型
-      - use: "openrouter/google/gemini-2.5-pro"
-        tokens: 200000
-
-      # [规则 2] 多模态视觉分流：当请求中携带图片、文件等非文本附件时，分流至视觉模型
-      - use: "deepseek-chat"
-        images: true
-
-      # [规则 3] 自然语言意图分流：用户发起简单快速提问时，分流至高性价比小模型
-      # （注：将触发内部 classifier 小模型在候选意图中极简判定，判定结果享有 10 分钟缓存）
-      - use: "deepseek-chat"
-        intent: "a quick question"
-
-      # [规则 4] 深度推理分流：当客户端明确要求深度思考（reasoning_effort=high 或 thinking budget）时
+      # [规则 1] 深度推理分流：当客户端明确要求深度思考（reasoning_effort=high 或 thinking budget）时
       # 映射至启用深度思考的主力模型（末尾的 :high 自动转换为原生思考参数）
       - use: "claude/claude-3-7-sonnet:high"
         effort: "high"
 
-      # [规则 5] 会话压缩分流：当客户端触发会话历史自动总结（如 /compact）时，使用低成本模型做摘要
+      # [规则 2] 超长上下文分流：当输入估算 Token 数量达到或超过 200,000 时，分流至大上下文模型
+      - use: "openrouter/google/gemini-2.5-pro"
+        tokens: 200000
+
+      # [规则 3] 多模态视觉分流：当请求中携带图片、文件等非文本附件时，分流至视觉模型
+      - use: "deepseek-chat"
+        images: true
+
+      # [规则 4] 会话压缩分流：当客户端触发会话历史自动总结（如 /compact）时，使用低成本模型做摘要
       - use: "deepseek-chat"
         compact: true
 
-      # [规则 6] 时间窗口分流：仅在工作日下午高峰时段（14:00 - 18:00，周一至周五）分流
+      # [规则 5] 时间窗口分流：仅在工作日下午高峰时段（14:00 - 18:00，周一至周五）分流
       - use: "deepseek-chat"
         time:
           from: "14:00"
           to: "18:00"
           days: ["mon", "tue", "wed", "thu", "fri"]
 
-      # [规则 7] 客户端 Agent 分流：仅当请求来源是指定的客户端（根据 User-Agent 识别）时分流
+      # [规则 6] 客户端 Agent 分流：仅当请求来源是指定的客户端（根据 User-Agent 识别）时分流
       - use: "claude/claude-3-7-sonnet"
         agents: ["claude", "codex"]
+
+      # [规则 7] 自然语言意图分流（位于静态规则之后、fallback 兜底之前）：
+      # 当所有静态规则均未命中时，询问小模型分类器该请求是否为简单提问（结果享有 10 分钟缓存）；
+      # 若小模型判定不属于简单提问，则顺理成章流转至下方的 fallback 兜底模型。
+      - use: "deepseek-chat"
+        intent: "a quick question"
