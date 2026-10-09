@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -30,7 +29,7 @@ func TestRouter_StaticRuleMatch(t *testing.T) {
 		},
 	}
 
-	router := NewRouter(cfg)
+	router := NewRouter(cfg, nil)
 	ctx := context.Background()
 
 	// 1. Request with small body -> matches rule 2 (deepseek-chat)
@@ -78,7 +77,7 @@ func TestRouter_ToolTurnAffinity(t *testing.T) {
 		},
 	}
 
-	router := NewRouter(cfg)
+	router := NewRouter(cfg, nil)
 	ctx := context.Background()
 
 	headers := http.Header{}
@@ -112,15 +111,12 @@ func TestRouter_ToolTurnAffinity(t *testing.T) {
 }
 
 func TestRouter_IntentClassification(t *testing.T) {
-	classifierServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"2"}}]}`))
-	}))
-	defer classifierServer.Close()
+	mockCaller := func(ctx context.Context, model string, body []byte) ([]byte, error) {
+		return []byte(`{"choices":[{"message":{"content":"2"}}]}`), nil
+	}
 
 	cfg := PluginConfig{
-		Enabled:    true,
-		GatewayURL: classifierServer.URL,
+		Enabled: true,
 		Groups: []GroupConfig{
 			{
 				ID:         "intent-group",
@@ -141,7 +137,7 @@ func TestRouter_IntentClassification(t *testing.T) {
 		},
 	}
 
-	router := NewRouter(cfg)
+	router := NewRouter(cfg, mockCaller)
 	ctx := context.Background()
 
 	req := pluginapi.ModelRouteRequest{

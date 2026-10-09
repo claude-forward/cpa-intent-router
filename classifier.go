@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,11 +35,12 @@ type inFlightCall struct {
 	err  error
 }
 
-// ClassifierClient performs structured intent classification against an upstream model.
+// HostModelCaller 定义宿主进程内直接执行模型的内部回调函数类型
+type HostModelCaller func(ctx context.Context, model string, body []byte) ([]byte, error)
+
+// ClassifierClient 执行结构化意图判别
 type ClassifierClient struct {
-	gatewayURL string
-	gatewayKey string
-	httpClient *http.Client
+	caller HostModelCaller
 
 	mu       sync.Mutex
 	cache    map[string]cacheEntry
@@ -50,38 +48,33 @@ type ClassifierClient struct {
 	failures map[string]time.Time
 }
 
-// NewClassifierClient instantiates a new ClassifierClient.
-func NewClassifierClient(gatewayURL, gatewayKey string) *ClassifierClient {
-	gatewayURL = strings.TrimRight(strings.TrimSpace(gatewayURL), "/")
-	if gatewayURL == "" {
-		gatewayURL = "http://127.0.0.1:8000"
-	}
+// NewClassifierClient 实例化分类器，接收内部宿主执行回调
+func NewClassifierClient(caller HostModelCaller) *ClassifierClient {
 	return &ClassifierClient{
-		gatewayURL: gatewayURL,
-		gatewayKey: strings.TrimSpace(gatewayKey),
-		httpClient: &http.Client{
-			Timeout: defaultClassifierTimeout,
-		},
+		caller:   caller,
 		cache:    make(map[string]cacheEntry),
 		inflight: make(map[string]*inFlightCall),
 		failures: make(map[string]time.Time),
 	}
 }
 
-// Classify classifies user text against a list of candidate intents using a small model.
+// Classify 通过小模型对用户发言在候选意图列表中进行极简结构化分类
 func (c *ClassifierClient) Classify(ctx context.Context, model string, intents []string, userText string) (string, error) {
 	if len(intents) == 0 || strings.TrimSpace(userText) == "" {
 		return "", nil
 	}
+	if c.caller == nil {
+		return "", errors.New("host model caller is not available")
+	}
 
-	// 1. Hash key for caching and singleflight
+	// 1. 生成唯一缓存与并发合并指纹
 	h := sha256.New()
 	h.Write([]byte(model + "\x00" + strings.Join(intents, "\x00") + "\x00" + strings.TrimSpace(userText)))
 	key := hex.EncodeToString(h.Sum(nil))
 
 	now := time.Now()
 
-	// 2. Cache & in-flight check
+	// 2. 检查缓存、故障熔断与单飞合并
 	c.mu.Lock()
 	if entry, ok := c.cache[key]; ok && now.Before(entry.expiresAt) {
 		c.mu.Unlock()
@@ -112,7 +105,7 @@ func (c *ClassifierClient) Classify(ctx context.Context, model string, intents [
 		c.mu.Unlock()
 	}()
 
-	// 3. Execute classification request
+	// 3. 内部原生执行极简分类请求
 	resultIntent, err := c.executeClassification(ctx, model, intents, userText)
 	call.res = resultIntent
 	call.err = err
@@ -161,35 +154,13 @@ func (c *ClassifierClient) executeClassification(ctx context.Context, model stri
 		return "", err
 	}
 
-	targetURL := c.gatewayURL + "/v1/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(bodyBytes))
+	// 宿主直接内部执行，避免跨进程/网络回环调用
+	respBytes, err := c.caller(ctx, model, bodyBytes)
 	if err != nil {
 		return "", err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "cpa-intent-router/1.0")
-	if c.gatewayKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.gatewayKey)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respData, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("classifier returned status %d: %s", resp.StatusCode, string(respData))
-	}
-
-	respData, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-
-	content := gjson.GetBytes(respData, "choices.0.message.content").String()
+	content := gjson.GetBytes(respBytes, "choices.0.message.content").String()
 	return parseIntentAnswer(content, intents)
 }
 
@@ -220,7 +191,7 @@ func parseIntentAnswer(answer string, intents []string) (string, error) {
 	}
 
 	if n == 0 {
-		return "", nil // None of the kinds
+		return "", nil
 	}
 	return intents[n-1], nil
 }

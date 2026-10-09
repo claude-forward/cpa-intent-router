@@ -10,33 +10,35 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// Router orchestrates two-stage dynamic routing: static rule filtering and LLM intent classification.
+// Router 负责执行两阶段动态路由：静态规则初筛与内部小模型极简意图分类
 type Router struct {
 	mu         sync.RWMutex
 	cfg        PluginConfig
 	sessions   *SessionTracker
 	classifier *ClassifierClient
+	caller     HostModelCaller
 }
 
-// NewRouter creates an initialized Router instance.
-func NewRouter(cfg PluginConfig) *Router {
+// NewRouter 创建 Router 实例
+func NewRouter(cfg PluginConfig, caller HostModelCaller) *Router {
 	r := &Router{
 		cfg:        cfg,
 		sessions:   NewSessionTracker(1 * time.Hour),
-		classifier: NewClassifierClient(cfg.GatewayURL, cfg.GatewayKey),
+		classifier: NewClassifierClient(caller),
+		caller:     caller,
 	}
 	return r
 }
 
-// UpdateConfig hot-reloads the router configuration.
+// UpdateConfig 热重载路由配置
 func (r *Router) UpdateConfig(cfg PluginConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cfg = cfg
-	r.classifier = NewClassifierClient(cfg.GatewayURL, cfg.GatewayKey)
+	r.classifier = NewClassifierClient(r.caller)
 }
 
-// RouteModel evaluates the incoming request against routing groups and rules.
+// RouteModel 评估传入请求并返回路由决策
 func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) pluginapi.ModelRouteResponse {
 	r.mu.RLock()
 	cfg := r.cfg
@@ -47,7 +49,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
 
-	// 1. Identify matching routing group
+	// 1. 匹配目标虚拟路由组
 	group, ok := findMatchingGroup(cfg.Groups, req.RequestedModel)
 	if !ok {
 		return pluginapi.ModelRouteResponse{Handled: false}
@@ -57,7 +59,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	feat := ExtractFeatures(req, now)
 	sessionKey := r.sessions.GenerateSessionKey(group.ID, req)
 
-	// 2. Check session / turn locking: within-turn tool call responses stay with current model
+	// 2. 轮次亲和性锁定：同一个 Turn 内部的多步工具交互（Tool Result）严格锁定在初始选择的模型
 	if feat.Within && sessionKey != "" {
 		if dec, found := r.sessions.GetDecision(sessionKey, now); found && dec.TargetModel != "" {
 			return pluginapi.ModelRouteResponse{
@@ -70,7 +72,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		}
 	}
 
-	// 3. Classify intent if rules require intent matching and user text is present
+	// 3. 意图分类：当规则中有意图要求且提取到了用户输入时，通过宿主内部直接调用分类器
 	var currentIntent string
 	if group.Classifier != "" && feat.UserText != "" {
 		candidateIntents := collectCandidateIntents(group.Rules, feat)
@@ -84,7 +86,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		}
 	}
 
-	// 4. Evaluate rules sequentially (first match wins)
+	// 4. 顺序匹配分流规则列表（首条完全命中的规则生效）
 	for i, rule := range group.Rules {
 		if MatchRule(rule, feat, currentIntent) {
 			provider, targetModel := ParseMember(rule.Use)
@@ -108,7 +110,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		}
 	}
 
-	// 5. Fallback if no rules matched
+	// 5. 规则均未命中时回退到组兜底模型
 	fallbackChoice := group.Fallback
 	if fallbackChoice == "" && len(group.Members) > 0 {
 		fallbackChoice = group.Members[0]
@@ -142,7 +144,6 @@ func findMatchingGroup(groups []GroupConfig, requestedModel string) (GroupConfig
 		return GroupConfig{}, false
 	}
 
-	// Match "group/<group_id>" or bare "<group_id>"
 	cleanModel := strings.TrimPrefix(requestedModel, "group/")
 
 	for _, g := range groups {
@@ -159,7 +160,6 @@ func collectCandidateIntents(rules []RuleConfig, feat RequestFeatures) []string 
 		if r.Intent == "" {
 			continue
 		}
-		// Quick pre-filtering on static criteria (tokens, images, effort, agents, time)
 		if r.Tokens > 0 && feat.Tokens < r.Tokens {
 			continue
 		}

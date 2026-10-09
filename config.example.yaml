@@ -1,49 +1,60 @@
-# cpa-intent-router 插件配置示例
+# cpa-intent-router 插件配置文件示例
+#
+# 插件作为 CLIProxyAPI 内部 C ABI 动态库加载，小模型意图分类通过内部进程内 RPC
+# (host.model.execute) 统一调用，无需配置任何外部 HTTP 地址或 API 密钥。
 
+# 是否启用意图路由插件（默认 true）
 enabled: true
-gateway_url: "http://127.0.0.1:8000"
-gateway_key: "" # 可选：调用网关的 API 凭据
 
-# 可选：如果希望从独立外部文件加载组与规则，配置 config_file
+# 可选：如果希望将路由组配置与主配置隔离，可指定外部独立配置文件路径（支持 YAML / JSON）
 # config_file: "/data/cli/groups.yaml"
 
+# 虚拟路由组（Routing Groups）定义列表
 groups:
-  - id: "opus-anywhere"
-    name: "Opus Anywhere"
-    members:
+  - id: "opus-anywhere"                       # 组唯一标识，客户端请求模型写为 "group/opus-anywhere" 或 "opus-anywhere"
+    name: "Opus Anywhere 智能路由组"           # 组可读名称，自动注册到 /v1/models 显示
+    members:                                  # 候选模型池列表，支持 "provider/model[:effort]" 或纯模型名
       - "openrouter/google/gemini-2.5-pro"
       - "deepseek-chat"
       - "claude/claude-3-7-sonnet"
-    classifier: "gemini/gemini-2.5-flash"
-    fallback: "claude/claude-3-7-sonnet"
+    classifier: "gemini/gemini-2.5-flash"     # 前置意图分类小模型（当 rules 包含自然语言 intent 时由宿主内部调用判别）
+    fallback: "claude/claude-3-7-sonnet"      # 兜底模型：当下方 rules 所有规则均未匹配命中时采用的分流目标
+
+    # rules: 顺序分流匹配规则（分支路由规则链）
+    # 【匹配机制】：
+    # 1. 严格从上到下按顺序逐条评估，首条命中的规则直接生效并终止后续判断（First Match Wins）。
+    # 2. 单条规则内部若定义了多个属性（如 tokens + images），必须全部满足才算命中（AND 逻辑）。
+    # 3. 同一轮次内部的工具调用交互（tool_call / tool_result）会自动锁定在首轮选定模型，保持会话一致性。
     rules:
-      # 1. 超长上下文优先分流至高吞吐大模型
+      # [规则 1] 超长上下文分流：当输入估算 Token 数量达到或超过 200,000 时，分流至大上下文模型
       - use: "openrouter/google/gemini-2.5-pro"
         tokens: 200000
 
-      # 2. 多模态图片输入路由至视觉模型
+      # [规则 2] 多模态视觉分流：当请求中携带图片、文件等非文本附件时，分流至视觉模型
       - use: "deepseek-chat"
         images: true
 
-      # 3. 简单问答意图分流至快速小模型
+      # [规则 3] 自然语言意图分流：用户发起简单快速提问时，分流至高性价比小模型
+      # （注：将触发内部 classifier 小模型在候选意图中极简判定，判定结果享有 10 分钟缓存）
       - use: "deepseek-chat"
         intent: "a quick question"
 
-      # 4. 高思考要求路由至带 Thinking 的主力模型
+      # [规则 4] 深度推理分流：当客户端明确要求深度思考（reasoning_effort=high 或 thinking budget）时
+      # 映射至启用深度思考的主力模型（末尾的 :high 自动转换为原生思考参数）
       - use: "claude/claude-3-7-sonnet:high"
         effort: "high"
 
-      # 5. 会话压缩请求分流至高性价比模型
+      # [规则 5] 会话压缩分流：当客户端触发会话历史自动总结（如 /compact）时，使用低成本模型做摘要
       - use: "deepseek-chat"
         compact: true
 
-      # 6. 时间窗口规则（如特定时段分流）
+      # [规则 6] 时间窗口分流：仅在工作日下午高峰时段（14:00 - 18:00，周一至周五）分流
       - use: "deepseek-chat"
         time:
           from: "14:00"
           to: "18:00"
           days: ["mon", "tue", "wed", "thu", "fri"]
 
-      # 7. 指定客户端来源分流
+      # [规则 7] 客户端 Agent 分流：仅当请求来源是指定的客户端（根据 User-Agent 识别）时分流
       - use: "claude/claude-3-7-sonnet"
         agents: ["claude", "codex"]

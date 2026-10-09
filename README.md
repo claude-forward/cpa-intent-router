@@ -4,77 +4,96 @@
 
 ---
 
-## 架构与路由流程
+## 路由架构与规则分流示意
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  [按意图]   [按规则]   [超长上下文]   [多模态]   [思考深度]     智能决策：首轮动态解析特征与意图，同轮工具调用严格锁定   │
-├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                                                        │
-│   ┌─────────────────┐             ┌───────────────────────┐             ┌─● claude-3-7-sonnet:high ───────────服务中─┐ │
-│   │   Claude Code   │             │      CLIProxyAPI      │             │   复杂设计 / 深度推理 (effort=high)          │ │
-│   │      Codex      │ ──────────► │   cpa-intent-router   │ ──────────► ├─○ gemini-2.5-pro ───────────────已就绪─┤ │
-│   │    OpenCode     │             │                       │             │   超长上下文分析 (tokens ≥ 200k)             │ │
-│   │    你的 Agent   │             │  虚拟组: group/dev    │             ├─○ deepseek-chat ────────────────就绪─┤ │
-│   └─────────────────┘             └───────────────────────┘             │   日常快速问答 (intent="quick question")     │ │
-│                                                                         ├─○ qwen-vl-max ──────────────────已就绪─┤ │
-│                                                                         │   多模态视觉识别 (images=true)               │ │
-│                                                                         └─○ deepseek-flash ───────────────已就绪─┤ │
-│                                                                             会话上下文压缩 (compact=true)              │ │
-│                                                                                                                        │
-│   客户端将请求发往虚拟模型 group/dev，由插件按上下文与意图自动路由至最佳模型，并保持工具调用会话一致。                │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  [按意图]   [按规则]   [超长上下文]   [多模态]   [思考深度]   智能决策：首轮解析分流规则链与意图，同轮工具调用严格锁定         │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                                                │
+│   ┌─────────────────┐             ┌───────────────────────┐         【rules 分流规则链（从上到下顺序评估，首条命中即终止）】   │
+│   │   Claude Code   │             │      CLIProxyAPI      │                                                                │
+│   │      Codex      │ ──────────► │   cpa-intent-router   │ ───────► 规则 1: tokens ≥ 200k ───────► gemini-2.5-pro (超长文本) │
+│   │    OpenCode     │             │                       │ ───────► 规则 2: images = true ───────► qwen-vl-max (视觉模态)   │
+│   │   你的 Agent    │             │   虚拟组: group/dev   │ ───────► 规则 3: effort = high ───────► claude-3-7-sonnet:high │
+│   └─────────────────┘             │                       │ ───────► 规则 4: compact = true ──────► deepseek-flash (会话压缩)│
+│                                   │   [宿主内部原生 RPC]  │ ───────► 规则 5: intent="quick question"                       │
+│                                   │   host.model.execute  │              │ (宿主内部 RPC 极简调用 classifier 小模型)       │
+│                                   │           │           │              └────────────────────────► deepseek-chat (快速问答) │
+│                                   │           ▼           │                                                                │
+│                                   │    gemini-2.5-flash   │ ───────► [全部未命中兜底 fallback] ───► claude-3-7-sonnet (主力)   │
+│                                   └───────────────────────┘                                                                    │
+│                                                                                                                                │
+│   客户端向虚拟模型 group/dev 发起请求，插件按顺序匹配 rules 规则分流；同轮多步工具交互自动锁定同一模型，防止会话漂移。         │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Client [客户端 / Agent]
-        A[Claude Code / Codex / OpenCode]
+        A[Claude Code / Codex / 你的 Agent]
     end
 
-    subgraph Gateway [CLIProxyAPI 聚合网关]
-        B[虚拟路由组<br/>group/dev]
-        P[cpa-intent-router 插件<br/>ModelRouter ABI]
-        B --> P
+    subgraph Gateway [CLIProxyAPI + 插件 (ModelRouter ABI)]
+        B[虚拟路由组 group/dev]
+        S{同轮工具交互<br/>Tool Result ?}
+        Lock[锁定首轮模型<br/>保持会话亲和]
     end
 
-    subgraph Phase1 [第一阶段：上下文特征初筛]
-        R1{静态规则匹配}
-        P --> R1
-        R1 -- "Token ≥ 200k" --> M2[gemini-2.5-pro<br/>海量上下文]
-        R1 -- "含图片/附件" --> M4[qwen-vl-max<br/>多模态视觉]
-        R1 -- "effort=high" --> M1[claude-3-7-sonnet:high<br/>深度推理]
-        R1 -- "compact 摘要" --> M5[deepseek-flash<br/>低成本压缩]
+    subgraph RuleChain [rules 分流规则链（从上到下顺序匹配，首个命中即终止）]
+        R1{规则 1: tokens ≥ 200k ?}
+        R2{规则 2: images = true ?}
+        R3{规则 3: effort = high ?}
+        R4{规则 4: compact 压缩 ?}
+        R5{规则 5: intent 意图匹配 ?}
+        Fallback[兜底模型 fallback]
     end
 
-    subgraph Phase2 [第二阶段：小模型意图分类]
-        R1 -- "需判定自然语言意图" --> C[Classifier 小模型<br/>gemini-flash / deepseek]
-        C -- "intent: quick question" --> M3[deepseek-chat<br/>轻量快速]
-        C -- "intent: architecture" --> M1
+    subgraph ClassifierEngine [小模型意图分类（宿主内部 RPC）]
+        RPC[宿主原生 host.model.execute<br/>零网络开销 / 进程内直接执行]
+        C[Classifier 小模型<br/>gemini-2.5-flash]
+        Cache[(10分钟 SHA-256 缓存<br/>+ Singleflight 防重)]
     end
 
-    subgraph Target [目标模型服务池]
-        M1
-        M2
-        M3
-        M4
-        M5
+    subgraph Targets [目标模型池]
+        M1[gemini-2.5-pro<br/>超长上下文]
+        M2[qwen-vl-max<br/>多模态模型]
+        M3[claude-3-7-sonnet:high<br/>深度推理思考]
+        M4[deepseek-flash<br/>低成本会话压缩]
+        M5[deepseek-chat<br/>轻量快速问答]
+        M_FB[claude-3-7-sonnet<br/>默认主力模型]
     end
 
-    A -->|model: group/dev| B
-    Target -.->|同轮工具调用 Tool Result 严格锁定| P
+    A -->|请求 group/dev| B
+    B --> S
+    S -- 是 (同一Turn交互) --> Lock
+    S -- 否 (新对话轮次) --> R1
+
+    R1 -- 命中 --> M1
+    R1 -- 未命中 --> R2
+    R2 -- 命中 --> M2
+    R2 -- 未命中 --> R3
+    R3 -- 命中 --> M3
+    R3 -- 未命中 --> R4
+    R4 -- 命中 --> M4
+    R4 -- 未命中 --> R5
+
+    R5 -- 需要意图判别 --> RPC
+    RPC --> Cache --> C
+    C -- 命中 quick question --> M5
+
+    R5 -- 未命中/无意图 --> Fallback --> M_FB
 ```
 
 ---
 
 ## 核心能力
 
-1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口。
-2. **两阶段动态路由分流**：
+1. **虚拟路由组（Routing Group）**：支持将异构模型编组（如 `group/dev` 或 `dev`），并对外暴露统一虚拟模型入口，自动注册至 `/v1/models`。
+2. **两阶段动态规则分流（rules 规则链）**：
    - **第一阶段（零额外开销静态规则）**：按 Token 估算阈值、多模态图片输入、推理思考深度要求（`effort`）、客户端标识（`agents`）、会话压缩标志（`compact`）及时间窗口进行前置匹配。
-   - **第二阶段（小模型极简意图分类）**：支持自然语言描述意图（如 `"a quick question"`, `"writing or fixing tests"`），前置并发调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重）。
-3. **轮次亲和性锁定（Turn Affinity Locking）**：识别多步工具交互轮次（Tool Call / Tool Result），同轮交互严格锁定在首轮选定模型，防止模型漂移。
-4. **模型目录自动注册**：自动将虚拟路由组注入 `/v1/models` 供客户端直接发现与调用。
+   - **第二阶段（宿主内部小模型极简意图分类）**：支持自然语言描述意图（如 `"a quick question"`, `"writing or fixing tests"`），通过宿主进程内原生 RPC（`host.model.execute`）直接调用轻量模型极简分类（内置 10 分钟 SHA-256 缓存与 Singleflight 防重，**无需配置任何外部 HTTP 地址或 API Key**）。
+3. **轮次亲和性锁定（Turn Affinity Locking）**：精准识别多步工具交互轮次（Tool Call / Tool Result），同一轮次交互严格锁定在首轮选定模型，防止模型漂移。
 
 ---
 
@@ -89,36 +108,57 @@ CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -buildmode=c-shared -o 
 
 ---
 
-## 配置示例
+## 详细配置说明
 
-在 CLIProxyAPI 的 `config.yaml` 中配置插件段（或在插件自身配置文件中声明）：
+在 CLIProxyAPI 的 `config.yaml` 中配置插件段（或使用 `config_file` 指向独立文件）：
 
 ```yaml
 plugins:
   configs:
     cpa-intent-router:
-      enabled: true
-      gateway_url: "http://127.0.0.1:8000"
+      enabled: true                     # 是否启用意图路由插件（默认 true）
+
+      # 虚拟路由组定义
       groups:
-        - id: "opus-anywhere"
-          name: "Opus Anywhere"
-          members:
+        - id: "opus-anywhere"           # 组唯一标识，客户端请求写为 "group/opus-anywhere" 或 "opus-anywhere"
+          name: "Opus Anywhere 智能组"   # 组可读名称
+          members:                      # 候选模型池
             - "openrouter/google/gemini-2.5-pro"
             - "deepseek-chat"
             - "claude/claude-3-7-sonnet"
-          classifier: "gemini/gemini-2.5-flash"
-          fallback: "claude/claude-3-7-sonnet"
+          classifier: "gemini/gemini-2.5-flash" # 前置意图分类小模型（宿主内部 RPC 直接调用）
+          fallback: "claude/claude-3-7-sonnet"  # 兜底模型：所有规则未命中时生效
+
+          # rules: 分流匹配规则链（从上到下顺序匹配，首个完全命中即生效）
           rules:
+            # 1. 超长上下文分流 (Tokens >= 200,000)
             - use: "openrouter/google/gemini-2.5-pro"
               tokens: 200000
+
+            # 2. 多模态视觉分流 (携带图片/附件)
             - use: "deepseek-chat"
               images: true
+
+            # 3. 意图分类分流 (由内部 classifier 小模型判定，享 10 分钟缓存)
             - use: "deepseek-chat"
               intent: "a quick question"
+
+            # 4. 深度推理思考分流 (客户端要求 reasoning_effort=high 时)
             - use: "claude/claude-3-7-sonnet:high"
               effort: "high"
+
+            # 5. 会话压缩分流 (客户端触发 /compact 自动摘要时)
             - use: "deepseek-chat"
               compact: true
+
+            # 6. 时间窗口分流 (特定时段生效，支持跨午夜)
+            - use: "deepseek-chat"
+              time:
+                from: "14:00"
+                to: "18:00"
+                days: ["mon", "tue", "wed", "thu", "fri"]
+
+            # 7. 客户端来源分流 (根据 User-Agent 识别客户端)
             - use: "claude/claude-3-7-sonnet"
               agents: ["claude", "codex"]
 ```

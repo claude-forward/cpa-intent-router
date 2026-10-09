@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -36,13 +34,11 @@ func TestParseIntentAnswer(t *testing.T) {
 	}
 }
 
-func TestClassifierClient_MockServer(t *testing.T) {
+func TestClassifierClient_DirectInternalCaller(t *testing.T) {
 	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockCaller := func(ctx context.Context, model string, body []byte) ([]byte, error) {
 		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{
+		return []byte(`{
 			"choices": [
 				{
 					"message": {
@@ -50,14 +46,13 @@ func TestClassifierClient_MockServer(t *testing.T) {
 					}
 				}
 			]
-		}`))
-	}))
-	defer server.Close()
+		}`), nil
+	}
 
-	client := NewClassifierClient(server.URL, "test-key")
+	client := NewClassifierClient(mockCaller)
 	intents := []string{"fixing tests", "quick question", "planning"}
 
-	// First call should reach server
+	// First call should invoke mock caller
 	ctx := context.Background()
 	res, err := client.Classify(ctx, "mock-model", intents, "what time is it?")
 	if err != nil {
@@ -70,7 +65,7 @@ func TestClassifierClient_MockServer(t *testing.T) {
 		t.Fatalf("expected callCount=1, got %d", callCount)
 	}
 
-	// Second identical call should hit cache without calling server again
+	// Second identical call should hit cache without calling caller again
 	res2, err2 := client.Classify(ctx, "mock-model", intents, "what time is it?")
 	if err2 != nil {
 		t.Fatalf("Classify second call failed: %v", err2)
